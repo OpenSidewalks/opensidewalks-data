@@ -1,0 +1,90 @@
+{
+  "city": "Seattle",
+  "bounds": [-122.7461, 47.4290, -121.6681, 47.8450],
+  "layers": {
+    "sidewalks": {
+      "url": "https://data.seattle.gov/api/assets/038178CC-C40F-4FD2-912C-1E1CF2602D00?download=true",
+      "ftype": "zip",
+      "shapefile": "Sidewalks/Sidewalks",
+      "metadata": {
+          "pkey": {
+              "colname": "COMPKEY"
+          },
+          "streets_pkey": {
+              "colname": "SEGKEY"
+          }
+      }
+    },
+    "streets": {
+      "url": "https://data.seattle.gov/download/afip-2mzr/application%2Fzip",
+      "ftype": "zip",
+      "shapefile": "StatePlane/Street_Network_Database",
+      "metadata": {
+          "pkey": {
+              "colname": "COMPKEY",
+              "nullvalue": 0
+          },
+          "layer": {
+              "colname": "STRUCTURE_",
+              "colname_orig": "STRUCTURE_TYPE",
+              "categorymap": {
+                  "0": -1,
+                  "1": 0,
+                  "2": 1,
+                  "3": null
+              }
+          },
+          "waytype": {
+              "colname": "SEGMENT_TY",
+              "colname_orig": "SEGMENT_TYPE",
+              "categorymap": {
+                  "1": "street",
+                  "2": "motorway_link",
+                  "3": "highway",
+                  "4": "motorway_link",
+                  "5": "alley",
+                  "6": "stairs",
+                  "7": "pedestrian",
+                  "8": "trail",
+                  "9": "railroad",
+                  "10": "dock",
+                  "11": "lightrail",
+                  "12": "monorail",
+                  "13": "trolley",
+                  "14": "parking",
+                  "15": null
+              }
+          },
+          "divider": {
+              "colname": "DIVIDED_CO",
+              "colname_orig": "DIVIDED_CODE",
+              "categorymap": {
+                  "1": "undivided",
+                  "2": "boulevard",
+                  "3": "median",
+                  "4": "gradeseparated",
+                  "5": "jersey_barrier",
+                  "6": "divided",
+                  "7": null
+              }
+          }
+      }
+    },
+    "curbramps": {
+      "url": "https://data.seattle.gov/api/assets/F216D373-7F6E-4995-AFB8-008EFEB78E6F?download=true",
+      "ftype": "zip",
+      "shapefile": "Curb_Ramps/Curb_Ramps"
+    }
+  },
+  "annotations": {
+    "marked_crosswalks": {
+      "url": "https://data.seattle.gov/api/assets/843B8A94-11B2-4B6C-88CA-B9F54803B07D?download=true",
+      "ftype": "zip",
+      "shapefile": "Marked_Crosswalks/SDOT_Marked_Crosswalks",
+      "annotates": "crossings",
+      "default_tags": [{
+        "marked": true
+      }]
+    }
+  }
+}

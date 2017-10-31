@@ -1,0 +1,9 @@
+click==6.7
+geopandas==0.3.0
+numpy==1.13.3
+pandas==0.21.0
+requests==2.18.4
+rtree==0.8.3
+Shapely==1.6.2.post1
+rasterio==0.36.0
+sidewalkify==0.1.2
