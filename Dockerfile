@@ -15,6 +15,7 @@ RUN apt-get update && \
       libspatialindex-dev \
       python3-dev \
       python3-pip \
+      python3-gdal \
       unzip
 
 #

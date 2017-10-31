@@ -244,13 +244,19 @@ def redraw(pathname):
 
     click.echo('Generating crossings...')
     crossings = make_crossings.make_graph(sidewalks, streets)
+
+    # Ensure crs is set
+
+    sidewalks.crs = streets.crs
+    crossings.crs = streets.crs
+
     if crossings.empty:
         raise Exception('Generated no crossings')
     else:
-        put_data(crossings, pathname, 'crossings', 'output')
+        put_data(crossings, build_dir(pathname), 'crossings', 'redrawn')
 
     click.echo('Writing to file...')
-    put_data(sidewalks, pathname, 'sidewalks', 'output')
+    put_data(sidewalks, build_dir(pathname), 'sidewalks', 'redrawn')
 
 
 @cli.command()
@@ -265,10 +271,11 @@ def annotate(pathname):
         frames = {}
         layers = ['sidewalks', 'crossings']
         for layer in layers:
-            frames[layer] = get_data(pathname, layer, 'output')
+            frames[layer] = get_data(build_dir(pathname), layer, 'redrawn')
 
         # Also add crossings...
-        frames['crossings'] = get_data(pathname, 'crossings', 'output')
+        frames['crossings'] = get_data(build_dir(pathname), 'crossings',
+                                       'redrawn')
 
         annotations = sources.get('annotations')
         if annotations is not None:
@@ -287,7 +294,25 @@ def annotate(pathname):
                 # FIXME: hard-coded sidewalks here
                 annotate_line_from_points(frames['crossings'], gdf,
                                           annotation['default_tags'])
-                put_data(frames['crossings'], pathname, 'crossings', 'output')
+                put_data(frames['crossings'], build_dir(pathname), 'crossings',
+                         'redrawn')
+
+
+@cli.command()
+@click.argument('pathname')
+def finalize(pathname):
+    click.echo('Finalizing data')
+    frames = {}
+    layers = ['sidewalks', 'crossings']
+    for layer in layers:
+        frames[layer] = get_data(build_dir(pathname), layer, 'redrawn')
+
+    # Also add crossings...
+    frames['crossings'] = get_data(build_dir(pathname), 'crossings', 'redrawn')
+
+    for name, gdf in frames.items():
+        gdf_wgs84 = gdf.to_crs({'init': 'epsg:4326'})
+        put_data(gdf_wgs84, pathname, name, 'output')
 
 
 @cli.command()
@@ -307,6 +332,7 @@ def all(ctx, pathname):
     ctx.forward(standardize)
     ctx.forward(redraw)
     ctx.forward(annotate)
+    ctx.forward(finalize)
 
 
 if __name__ == '__main__':
