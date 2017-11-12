@@ -312,7 +312,7 @@ def finalize(pathname):
 
     for name, gdf in frames.items():
         gdf_wgs84 = gdf.to_crs({'init': 'epsg:4326'})
-        put_data(gdf_wgs84, pathname, name, 'output')
+        put_data(gdf_wgs84, pathname, name, 'data')
 
 
 @cli.command()
