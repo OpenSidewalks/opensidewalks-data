@@ -11,9 +11,11 @@ from tempfile import mkdtemp
 
 import click
 import geopandas as gpd
+import rasterio as rio
 import sidewalkify
 
 from .annotate import annotate_line_from_points
+from .raster_interp import interpolated_value
 from . import fetchers
 from . import dems
 from . import clean as sidewalk_clean
@@ -92,7 +94,9 @@ def fetch_dem(pathname):
             layernames]
 
     click.echo('Downloading DEMs...')
-    dems.dem_workflow(gdfs, outdir)
+    # FIXME: all DEMs should be merged into a single file at this point, but
+    # currently aren't?
+    dems.dem_workflow(gdfs, outdir, wgs84=True)
 
 
 @cli.command()
@@ -201,6 +205,13 @@ def standardize(pathname):
 
     click.echo('Assigning sidewalk side to streets...')
     streets = sidewalk_clean.sw_tag_streets(sidewalks, streets)
+    # FIXME: Use UTM for meters-based calculations, wgs84 at all other times
+
+    # FIXME: remove / turn into a debug mode
+    sidewalks_wgs84 = sidewalks.to_crs({'init': 'epsg:4326'})
+    bounds = (-122.3202, 47.6503, -122.3102, 47.6624)
+    query = sidewalks_wgs84.sindex.intersection(bounds, objects=True)
+    sidewalks = sidewalks.loc[[q.object for q in query]]
 
     put_data(streets, pathname, 'streets', 'standardized')
     put_data(sidewalks, pathname, 'sidewalks', 'standardized')
@@ -218,17 +229,6 @@ def redraw(pathname):
     sidewalk_paths = sidewalkify.graph.graph_workflow(streets)
     sidewalks = sidewalkify.draw.draw_sidewalks(sidewalk_paths,
                                                 crs=streets.crs)
-    # sidewalks = sidewalk_clean.redraw_sidewalks(streets)
-
-    # click.echo('Cleaning with street buffers...')
-    # sidewalks, buffers = sidewalk_clean.buffer_clean(sidewalks, streets)
-
-    # click.echo('Sanitizing sidewalks...')
-    # sidewalks = sidewalk_clean.sanitize(sidewalks)
-
-    # click.echo('Snapping sidewalk ends...')
-    # This step is slow - profile it!
-    # sidewalks = sidewalk_clean.snap(sidewalks, streets)
 
     # Join back to street data to retrieve metadata used for crossings
     joined = sidewalks.merge(streets, left_on='street_id', right_on='id',
@@ -246,7 +246,6 @@ def redraw(pathname):
     crossings = make_crossings.make_graph(sidewalks, streets)
 
     # Ensure crs is set
-
     sidewalks.crs = streets.crs
     crossings.crs = streets.crs
 
@@ -277,10 +276,51 @@ def annotate(pathname):
         frames['crossings'] = get_data(build_dir(pathname), 'crossings',
                                        'redrawn')
 
+        # Add incline info to sidewalks, crossings
+        # Read in DEM
+        def interp_line(row):
+            geom = row['geometry']
+            x1, y1 = geom.coords[0][0], geom.coords[0][1]
+            x2, y2 = geom.coords[-1][0], geom.coords[-1][1]
+            start = interpolated_value(x1, y1, dem, dem_arr)
+            end = interpolated_value(x2, y2, dem, dem_arr)
+            incline = (end - start) / row['length']
+
+            return incline
+
+        dem_path = os.path.join(pathname, 'build', 'dems', 'merged.tif')
+
+        with rio.open(dem_path) as dem:
+            click.echo('    Calculating inclines...')
+            # TODO: put elevation stuff in its own function
+            # FIXME: Too much conversion between latlon and UTM!
+            # TODO: Use sample to read data from disk rather than in-memory
+            dem_arr = dem.read(1)
+
+            sidewalks = frames['sidewalks'].to_crs({'init': 'epsg:26910'})
+            crossings = frames['crossings'].to_crs({'init': 'epsg:26910'})
+            frames['sidewalks']['length'] = sidewalks.geometry.length
+            frames['crossings']['length'] = crossings.geometry.length
+
+            sidewalks_demcrs = frames['sidewalks'].to_crs(dem.crs)
+            crossings_demcrs = frames['crossings'].to_crs(dem.crs)
+
+            sw_incline = sidewalks_demcrs.apply(interp_line, axis=1)
+            cr_incline = crossings_demcrs.apply(interp_line, axis=1)
+
+            frames['sidewalks']['incline'] = sw_incline
+            frames['crossings']['incline'] = cr_incline
+
+            put_data(frames['sidewalks'], build_dir(pathname), 'sidewalks',
+                     'annotated')
+            put_data(frames['crossings'], build_dir(pathname), 'crossings',
+                     'annotated')
+
         annotations = sources.get('annotations')
         if annotations is not None:
             click.echo('Annotating...')
             for name, annotation in annotations.items():
+                # TODO: download all files at the beginning
                 # Fetch the annotations
                 click.echo('Downloading {}...'.format(name))
                 url = annotation['url']
@@ -291,11 +331,14 @@ def annotate(pathname):
                 gdf = gdf.to_crs({'init': 'epsg:26910'})
 
                 # Apply appropriate functions, overwrite layers in 'clean' dir
-                # FIXME: hard-coded sidewalks here
+                # FIXME: this is hardcoded. Might as well just have a
+                # 'curb ramps' flag instead.
+                crs = gdf.crs
                 annotate_line_from_points(frames['crossings'], gdf,
                                           annotation['default_tags'])
+                frames['crossings'].crs = crs
                 put_data(frames['crossings'], build_dir(pathname), 'crossings',
-                         'redrawn')
+                         'annotated')
 
 
 @cli.command()
@@ -305,10 +348,22 @@ def finalize(pathname):
     frames = {}
     layers = ['sidewalks', 'crossings']
     for layer in layers:
-        frames[layer] = get_data(build_dir(pathname), layer, 'redrawn')
+        frames[layer] = get_data(build_dir(pathname), layer, 'annotated')
 
     # Also add crossings...
-    frames['crossings'] = get_data(build_dir(pathname), 'crossings', 'redrawn')
+    frames['crossings'] = get_data(build_dir(pathname), 'crossings',
+                                   'annotated')
+
+    # Reduce columns via whitelist logic
+    sw_crs = frames['sidewalks'].crs
+    cr_crs = frames['crossings'].crs
+
+    sidewalks_cols = ['geometry', 'incline']
+    crossings_cols = ['geometry', 'incline', 'marked']
+    frames['sidewalks'] = gpd.GeoDataFrame(frames['sidewalks'][sidewalks_cols])
+    frames['crossings'] = gpd.GeoDataFrame(frames['crossings'][crossings_cols])
+    frames['sidewalks'].crs = sw_crs
+    frames['crossings'].crs = cr_crs
 
     for name, gdf in frames.items():
         gdf_wgs84 = gdf.to_crs({'init': 'epsg:4326'})

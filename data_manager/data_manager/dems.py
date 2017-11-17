@@ -6,9 +6,9 @@ import zipfile
 
 import click
 import geopandas as gpd
-import rasterio
-from rasterio import Affine
-from rasterio.warp import calculate_default_transform, reproject, RESAMPLING
+import rasterio as rio
+from rasterio.merge import merge as merge_dems
+from rasterio.warp import calculate_default_transform, reproject, Resampling
 import requests
 from shapely import geometry
 
@@ -121,7 +121,7 @@ def fetch_dem(region):
                     g.write(f.read())
 
     # Read into memory
-    dem = rasterio.open(os.path.join(tempdir, 'w001001.adf'))
+    dem = rio.open(os.path.join(tempdir, 'w001001.adf'))
     return dem
 
 
@@ -137,32 +137,31 @@ def fetch_dems(gdfs):
 def dem_to_wgs84(src, path, scale=1.0):
     dst_crs = 'EPSG:4326'
 
-    affine, width, height = calculate_default_transform(
+    transform, width, height = calculate_default_transform(
         src.crs, dst_crs, src.width, src.height, *src.bounds)
     kwargs = src.meta.copy()
     kwargs.update({
         'crs': dst_crs,
-        'transform': affine,
-        'affine': affine,
+        'transform': transform,
         'width': round(width * scale),
         'height': round(height * scale),
         'driver': 'GTiff',
         'compress': 'lz2'
     })
 
-    with rasterio.open(path, 'w', **kwargs) as dst:
+    with rio.open(path, 'w', **kwargs) as dst:
         for i in range(1, src.count + 1):
             aff = src.affine
-            newaff = Affine(aff.a / scale, aff.b, aff.c,
-                            aff.d, aff.e / scale, aff.f)
+            newaff = rio.Affine(aff.a / scale, aff.b, aff.c,
+                                aff.d, aff.e / scale, aff.f)
             reproject(
-                source=rasterio.band(src, i),
-                destination=rasterio.band(dst, i),
+                source=rio.band(src, i),
+                destination=rio.band(dst, i),
                 src_transform=aff,
                 src_crs=src.crs,
                 dst_transform=newaff,
                 dst_crs=dst_crs,
-                resampling=RESAMPLING.cubic)
+                resampling=Resampling.cubic)
     src.close()
     dst.close()
 
@@ -173,9 +172,10 @@ def dem_workflow(gdfs, outdir, wgs84=False):
 
     # Reproject to wgs84 to keep things standardize, write to standard
     # location, and clean up the temporary dir
+    path_template = os.path.join(outdir, '{}.tif')
     for region, dem in dems.items():
         try:
-            path = os.path.join(outdir, '{}.tif'.format(region))
+            path = path_template.format(region)
             if wgs84:
                 dem_to_wgs84(dem, path, 1.0)
             else:
@@ -185,7 +185,7 @@ def dem_workflow(gdfs, outdir, wgs84=False):
                     'height': dem.height,
                     'count': dem.count,
                     'dtype': dem.dtypes[0],
-                    'transform': Affine(
+                    'transform': rio.Affine(
                       (bounds.right - bounds.left) / dem.width,
                       0,
                       bounds.left,
@@ -199,7 +199,7 @@ def dem_workflow(gdfs, outdir, wgs84=False):
                 }
                 # TODO: handle multiple bands?
                 click.echo('    Writing to file...')
-                with rasterio.open(path, 'w', **kwargs) as dst:
+                with rio.open(path, 'w', **kwargs) as dst:
                     band = dem.read(1)
                     dst.write(band, 1)
                     # Remove from memory
@@ -209,3 +209,25 @@ def dem_workflow(gdfs, outdir, wgs84=False):
         finally:
             dem.close()
             shutil.rmtree(os.path.dirname(dem.name))
+
+    # Merge into a single raster file
+    sources = []
+    for region, dem in dems.items():
+        sources.append(rio.open(path_template.format(region)))
+    arr, transform = merge_dems(sources)
+
+    profile = {
+        'width': arr.shape[1],
+        'height': arr.shape[2],
+        'count': dem.count,
+        'dtype': dem.dtypes[0],
+        'transform': transform,
+        'crs': dem.crs,
+        'driver': 'GTiff',
+        'compress': 'lzw'
+    }
+
+    with rio.open(path_template.format('merged'), 'w', **profile) as dst:
+        dst.write(arr)
+
+        # FIXME: delete original DEMs

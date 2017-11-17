@@ -1,3 +1,7 @@
+import math
+import rasterio as rio
+
+
 def annotate_line_from_points(lines, points, defaults, threshold=3.5):
     # For each point, find the closest line
     lines.sindex
