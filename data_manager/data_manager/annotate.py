@@ -1,5 +1,4 @@
-import math
-import rasterio as rio
+from shapely.geometry import Point
 
 
 def annotate_line_from_points(lines, points, defaults, threshold=3.5):
@@ -12,3 +11,20 @@ def annotate_line_from_points(lines, points, defaults, threshold=3.5):
             for default in defaults:
                 for key, value in default.items():
                     lines.loc[line.name, key] = value
+
+
+def endpoints_bool(lines, points, threshold=3.5):
+    # Idea is that to return a series value of true, the points must be within
+    # 'threshold' distance.
+
+    def both_endpoints(geometry, points):
+        start = Point(geometry.coords[0])
+        end = Point(geometry.coords[-1])
+        for endpoint in [start, end]:
+            query = points.sindex.nearest(endpoint.bounds, 1, objects=True)
+            point = points.loc[[q.object for q in query]].iloc[0]['geometry']
+            if point.distance(endpoint) > threshold:
+                return False
+        return True
+
+    return lines.geometry.apply(both_endpoints, args=[points])

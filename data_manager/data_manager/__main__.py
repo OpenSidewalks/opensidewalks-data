@@ -14,7 +14,7 @@ import geopandas as gpd
 import rasterio as rio
 import sidewalkify
 
-from .annotate import annotate_line_from_points
+from .annotate import annotate_line_from_points, endpoints_bool
 from .raster_interp import interpolated_value
 from . import fetchers
 from . import dems
@@ -336,6 +336,12 @@ def annotate(pathname):
                 crs = gdf.crs
                 annotate_line_from_points(frames['crossings'], gdf,
                                           annotation['default_tags'])
+
+                curbramps = get_data(build_dir(pathname), 'curbramps',
+                                     'standardized')
+
+                curbramps_ends = endpoints_bool(curbramps, frames['crossings'])
+                frames['crossings']['curbramps'] = curbramps_ends
                 frames['crossings'].crs = crs
                 put_data(frames['crossings'], build_dir(pathname), 'crossings',
                          'annotated')
@@ -359,7 +365,7 @@ def finalize(pathname):
     cr_crs = frames['crossings'].crs
 
     sidewalks_cols = ['geometry', 'incline']
-    crossings_cols = ['geometry', 'incline', 'marked']
+    crossings_cols = ['geometry', 'incline', 'marked', 'curbramps']
     frames['sidewalks'] = gpd.GeoDataFrame(frames['sidewalks'][sidewalks_cols])
     frames['crossings'] = gpd.GeoDataFrame(frames['crossings'][crossings_cols])
     frames['sidewalks'].crs = sw_crs

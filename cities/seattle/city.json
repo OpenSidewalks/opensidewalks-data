@@ -73,7 +73,13 @@
     "curbramps": {
       "url": "https://data.seattle.gov/api/assets/F216D373-7F6E-4995-AFB8-008EFEB78E6F?download=true",
       "ftype": "zip",
-      "shapefile": "Curb_Ramps/Curb_Ramps"
+      "shapefile": "Curb_Ramps/Curb_Ramps",
+      "annotates": [{
+        "layer": "crossings",
+        "geostrategy": "endpoint",
+        "colname": "curbramps",
+        "value": "boolean"
+      }]
     }
   },
   "annotations": {
