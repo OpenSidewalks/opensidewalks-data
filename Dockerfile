@@ -31,8 +31,8 @@ WORKDIR /sourcedata
 # Install dependencies first so rebuilds go faster if code changes
 COPY ./data_manager/requirements.txt /sourcedata/requirements.txt
 # Install numpy first because other packages want it and pip is dumb
-RUN pip3 install `grep numpy requirements.txt`
-RUN pip3 install -r requirements.txt
+RUN pip3 install --ignore-installed `grep numpy requirements.txt`
+RUN pip3 install --ignore-installed -r requirements.txt
 # Install whole package
 COPY ./data_manager /sourcedata/data_manager
 RUN pip3 install /sourcedata/data_manager

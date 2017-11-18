@@ -151,7 +151,7 @@ def dem_to_wgs84(src, path, scale=1.0):
 
     with rio.open(path, 'w', **kwargs) as dst:
         for i in range(1, src.count + 1):
-            aff = src.affine
+            aff = src.transform
             newaff = rio.Affine(aff.a / scale, aff.b, aff.c,
                                 aff.d, aff.e / scale, aff.f)
             reproject(

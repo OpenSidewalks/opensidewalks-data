@@ -19,7 +19,7 @@ from .raster_interp import interpolated_value
 from . import fetchers
 from . import dems
 from . import clean as sidewalk_clean
-from . import make_crossings
+from .crossings import make_crossings
 from .standardize import standardize_df, assign_st_to_sw, whitelist_filter
 # FIXME: refactor to be object-oriented on a per-dataset level. Classes
 # implement methods for standardization, cleaning, etc.
@@ -82,6 +82,7 @@ def fetch_dem(pathname):
     pathname/dem/region, where region is e.g. n48w123.
 
     '''
+    # FIXME: Don't download redundant NED data - use global cache dir
     metadata = get_metadata(pathname)
     pathname = build_dir(pathname)
     outdir = os.path.join(pathname, 'dems')
@@ -169,54 +170,34 @@ def standardize(pathname):
                                           frames['streets'])
 
     for layer in layers:
-        # Project to SRID 26910 (NAD83 for WA in meters)
-        # FIXME: this shouldn't be hardcoded, should be determined from extent
-        # May also need to ask for projection from user, if dataset doesn't
-        # report it (or reports it incorrectly)
-        # FIXME: Use non-NAD83?
-        click.echo('    Reprojecting to srid 26910...')
-        srid = '26910'
         frame = frames[layer]
 
         # Reprojection creates an error for empty geometries - they must
         # be removed first
         frame = frame.dropna(axis=0, subset=['geometry'])
-        # frame = frame[~frame.geometry.is_empty]
-        # frame = frame[~frame['geometry'].isnull()]
 
         # Reproject
-        frame = frame.to_crs({'init': 'epsg:{}'.format(srid)})
+        frames[layer] = frame.to_crs({'init': 'epsg:4326'})
+
+        # FIXME: remove / turn into a debug mode
+        # if layer == 'streets':
+        #     bounds = (-122.3202, 47.6503, -122.3102, 47.6624)
+        #     query = frame.sindex.intersection(bounds, objects=True)
+        #     frame = frame.loc[[q.object for q in query]]
 
         frames[layer] = frame
 
-        # May need to overwrite files, but Fiona (used by GeoPandas) can't do
-        # that sometimes, so remove first
-        # click.echo('    Writing file...')
-        # for filepath in os.listdir(outpath):
-        #     if filepath.split(os.extsep, 1)[0] == layer:
-        #         os.remove(os.path.join(outpath, filepath))
-
-        # # Write back to the same files
-        # # TODO: Make writing to file non-blocking (threads?)
-    click.echo('done')
-
-    streets = frames['streets']
-    sidewalks = frames['sidewalks']
-
     click.echo('Assigning sidewalk side to streets...')
+    # FIXME: don't hard-code meters crs
+    streets = frames['streets'].to_crs({'init': 'epsg:26910'})
+    sidewalks = frames['sidewalks'].to_crs({'init': 'epsg:26910'})
     streets = sidewalk_clean.sw_tag_streets(sidewalks, streets)
-    # FIXME: Use UTM for meters-based calculations, wgs84 at all other times
+    frames['streets'] = streets.to_crs({'init': 'epsg:4326'})
 
-    # FIXME: remove / turn into a debug mode
-    sidewalks_wgs84 = sidewalks.to_crs({'init': 'epsg:4326'})
-    bounds = (-122.3202, 47.6503, -122.3102, 47.6624)
-    query = sidewalks_wgs84.sindex.intersection(bounds, objects=True)
-    sidewalks = sidewalks.loc[[q.object for q in query]]
+    for layer in layers:
+        put_data(frames[layer], pathname, layer, 'standardized')
 
-    put_data(streets, pathname, 'streets', 'standardized')
-    put_data(sidewalks, pathname, 'sidewalks', 'standardized')
-    if 'curbramps' in frames:
-        put_data(frames['curbramps'], pathname, 'curbramps', 'standardized')
+    click.echo('done')
 
 
 @cli.command()
@@ -224,6 +205,8 @@ def standardize(pathname):
 def redraw(pathname):
     click.echo('Reading in standardized data')
     streets = get_data(build_dir(pathname), 'streets', 'standardized')
+    # FIXME: don't hardcode this
+    streets = streets.to_crs({'init': 'epsg:26910'})
 
     click.echo('Drawing sidewalks...')
     sidewalk_paths = sidewalkify.graph.graph_workflow(streets)
@@ -243,11 +226,11 @@ def redraw(pathname):
     sidewalks = gpd.GeoDataFrame(sidewalks)
 
     click.echo('Generating crossings...')
-    crossings = make_crossings.make_graph(sidewalks, streets)
+    crossings = make_crossings(sidewalks, streets)
 
     # Ensure crs is set
     sidewalks.crs = streets.crs
-    crossings.crs = streets.crs
+    crossings = crossings.to_crs(streets.crs)
 
     if crossings.empty:
         raise Exception('Generated no crossings')
@@ -268,13 +251,15 @@ def annotate(pathname):
         sources = json.load(f)
 
         frames = {}
-        layers = ['sidewalks', 'crossings']
-        for layer in layers:
+        layers = set(sources['layers'].keys())
+        primary = set(['sidewalks', 'crossings'])
+        # Extract sidewalks and crossings from `redrawn`, everything else from
+        # `standardized` directory
+        for layer in layers.difference(primary):
+            frames[layer] = get_data(build_dir(pathname), layer,
+                                     'standardized')
+        for layer in primary:
             frames[layer] = get_data(build_dir(pathname), layer, 'redrawn')
-
-        # Also add crossings...
-        frames['crossings'] = get_data(build_dir(pathname), 'crossings',
-                                       'redrawn')
 
         # Add incline info to sidewalks, crossings
         # Read in DEM
@@ -297,54 +282,51 @@ def annotate(pathname):
             # TODO: Use sample to read data from disk rather than in-memory
             dem_arr = dem.read(1)
 
-            sidewalks = frames['sidewalks'].to_crs({'init': 'epsg:26910'})
-            crossings = frames['crossings'].to_crs({'init': 'epsg:26910'})
-            frames['sidewalks']['length'] = sidewalks.geometry.length
-            frames['crossings']['length'] = crossings.geometry.length
-
-            sidewalks_demcrs = frames['sidewalks'].to_crs(dem.crs)
-            crossings_demcrs = frames['crossings'].to_crs(dem.crs)
-
-            sw_incline = sidewalks_demcrs.apply(interp_line, axis=1)
-            cr_incline = crossings_demcrs.apply(interp_line, axis=1)
-
-            frames['sidewalks']['incline'] = sw_incline
-            frames['crossings']['incline'] = cr_incline
-
-            put_data(frames['sidewalks'], build_dir(pathname), 'sidewalks',
-                     'annotated')
-            put_data(frames['crossings'], build_dir(pathname), 'crossings',
-                     'annotated')
+            for layer in ['sidewalks', 'crossings']:
+                frame = frames[layer].to_crs({'init': 'epsg:26910'})
+                frames[layer]['length'] = frame.geometry.length
+                frame_demcrs = frames[layer].to_crs(dem.crs)
+                frame_incline = frame_demcrs.apply(interp_line, axis=1)
+                frames[layer]['incline'] = frame_incline
+                put_data(frames[layer], build_dir(pathname), layer,
+                         'annotated')
 
         annotations = sources.get('annotations')
-        if annotations is not None:
-            click.echo('Annotating...')
-            for name, annotation in annotations.items():
-                # TODO: download all files at the beginning
-                # Fetch the annotations
-                click.echo('Downloading {}...'.format(name))
-                url = annotation['url']
-                click.echo(url)
-                gdf = fetchers.fetch_shapefile(url, annotation['shapefile'])
+        click.echo('Annotating...')
+        annotated = set([])
+        for plan in annotations:
+            # Get the data
+            source = frames[plan['source']]
+            target = frames[plan['target']]
 
-                # Reproject
-                gdf = gdf.to_crs({'init': 'epsg:26910'})
+            colname = plan['colname']
 
-                # Apply appropriate functions, overwrite layers in 'clean' dir
-                # FIXME: this is hardcoded. Might as well just have a
-                # 'curb ramps' flag instead.
-                crs = gdf.crs
-                annotate_line_from_points(frames['crossings'], gdf,
-                                          annotation['default_tags'])
+            # Reproject
+            source = source.to_crs({'init': 'epsg:26910'})
+            crs = source.crs
 
-                curbramps = get_data(build_dir(pathname), 'curbramps',
-                                     'standardized')
+            # Apply appropriate functions, overwrite layers in 'clean' dir
+            # FIXME: this is hardcoded. Might as well just have a
+            # 'curb ramps' flag instead.
+            if plan['method'] == "lines_from_points":
+                # TODO: implement strategy that changes locations of curb
+                # ramps, given that they're derived from inaccurate seattle
+                # sidewalks (keep sidewalk ID in redrawn sidewalks, join
+                # with curb ramps dataset)
+                result = annotate_line_from_points(target, source,
+                                                   plan['default'],
+                                                   plan['match'])
+                frames[plan['target']][colname] = result.astype(str)
+            elif plan['method'] == 'endpoints_bool':
+                result = endpoints_bool(target, source)
+                frames[plan['target']][colname] = result.astype(str)
 
-                curbramps_ends = endpoints_bool(curbramps, frames['crossings'])
-                frames['crossings']['curbramps'] = curbramps_ends
-                frames['crossings'].crs = crs
-                put_data(frames['crossings'], build_dir(pathname), 'crossings',
-                         'annotated')
+            target.crs = crs
+            annotated.add(plan['target'])
+
+        for target in annotated:
+            put_data(frames[target], build_dir(pathname),
+                     target, 'annotated')
 
 
 @cli.command()

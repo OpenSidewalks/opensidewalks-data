@@ -73,24 +73,27 @@
     "curbramps": {
       "url": "https://data.seattle.gov/api/assets/F216D373-7F6E-4995-AFB8-008EFEB78E6F?download=true",
       "ftype": "zip",
-      "shapefile": "Curb_Ramps/Curb_Ramps",
-      "annotates": [{
-        "layer": "crossings",
-        "geostrategy": "endpoint",
-        "colname": "curbramps",
-        "value": "boolean"
-      }]
-    }
-  },
-  "annotations": {
+      "shapefile": "Curb_Ramps/Curb_Ramps"
+    },
     "marked_crosswalks": {
       "url": "https://data.seattle.gov/api/assets/843B8A94-11B2-4B6C-88CA-B9F54803B07D?download=true",
       "ftype": "zip",
-      "shapefile": "Marked_Crosswalks/SDOT_Marked_Crosswalks",
-      "annotates": "crossings",
-      "default_tags": [{
-        "marked": true
-      }]
+      "shapefile": "Marked_Crosswalks/SDOT_Marked_Crosswalks"
     }
-  }
+  },
+  "annotations": [{
+    "source": "marked_crosswalks",
+    "target": "crossings",
+    "method": "lines_from_points",
+    "colname": "marked",
+    "default": false,
+    "match": true
+  }, {
+    "source": "curbramps",
+    "target": "crossings",
+    "method": "endpoints_bool",
+    "colname": "curbramps",
+    "default": false,
+    "match": true
+  }]
 }
