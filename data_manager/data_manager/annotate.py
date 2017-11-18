@@ -2,8 +2,6 @@ from shapely.geometry import Point
 
 
 def annotate_line_from_points(lines, points, default, match, threshold=3.5):
-    default = str(default)
-    match = str(match)
     lines = lines.to_crs(points.crs)
 
     def annotate_line(line_geom):

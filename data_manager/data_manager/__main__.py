@@ -316,10 +316,13 @@ def annotate(pathname):
                 result = annotate_line_from_points(target, source,
                                                    plan['default'],
                                                    plan['match'])
-                frames[plan['target']][colname] = result.astype(str)
+                # Fiona driver can't do booleans (even for GeoJSON!), so have
+                # to use ints or write own GeoJSON-writer (wouldn't be so
+                # bad...)
+                frames[plan['target']][colname] = result.astype(int)
             elif plan['method'] == 'endpoints_bool':
                 result = endpoints_bool(target, source)
-                frames[plan['target']][colname] = result.astype(str)
+                frames[plan['target']][colname] = result.astype(int)
 
             target.crs = crs
             annotated.add(plan['target'])
