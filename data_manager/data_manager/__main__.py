@@ -163,6 +163,11 @@ def standardize(pathname):
     }
     frames['streets'] = whitelist_filter(frames['streets'], st_whitelists)
 
+    # FIXME: remove / turn into a debug mode
+    # bounds = (-122.3202, 47.6503, -122.3102, 47.6624)
+    # query = frames['streets'].sindex.intersection(bounds, objects=True)
+    # frames['streets'] = frames['streets'].loc[[q.object for q in query]]
+
     # Assign street foreign key to sidewalks, remove sidewalks that don't refer
     # to a street
     click.echo('    Assigning sidewalks to streets...')
@@ -178,12 +183,6 @@ def standardize(pathname):
 
         # Reproject
         frames[layer] = frame.to_crs({'init': 'epsg:4326'})
-
-        # FIXME: remove / turn into a debug mode
-        # if layer == 'streets':
-        #     bounds = (-122.3202, 47.6503, -122.3102, 47.6624)
-        #     query = frame.sindex.intersection(bounds, objects=True)
-        #     frame = frame.loc[[q.object for q in query]]
 
         frames[layer] = frame
 
@@ -214,6 +213,7 @@ def redraw(pathname):
                                                 crs=streets.crs)
 
     # Join back to street data to retrieve metadata used for crossings
+    sidewalks_crs = sidewalks.crs
     joined = sidewalks.merge(streets, left_on='street_id', right_on='id',
                              how='left', suffixes=['_sw', '_st'])
     sidewalks = joined[['geometry_sw', 'street_id', 'layer', 'pkey', 'id',
@@ -224,8 +224,10 @@ def redraw(pathname):
         'geometry_sw': 'geometry'
     })
     sidewalks = gpd.GeoDataFrame(sidewalks)
+    sidewalks.crs = sidewalks_crs
 
     click.echo('Generating crossings...')
+
     crossings = make_crossings(sidewalks, streets)
 
     # Ensure crs is set
@@ -280,6 +282,7 @@ def annotate(pathname):
             # TODO: put elevation stuff in its own function
             # FIXME: Too much conversion between latlon and UTM!
             # TODO: Use sample to read data from disk rather than in-memory
+            #       Slower, but small memory footprint
             dem_arr = dem.read(1)
 
             for layer in ['sidewalks', 'crossings']:
@@ -349,8 +352,15 @@ def finalize(pathname):
     sw_crs = frames['sidewalks'].crs
     cr_crs = frames['crossings'].crs
 
-    sidewalks_cols = ['geometry', 'incline']
-    crossings_cols = ['geometry', 'incline', 'marked', 'curbramps']
+    # FIXME: rather than a whitelist, should use a blacklist of columns added
+    # as intermediates / never add them in the first place. Other cities may
+    # need new / arbitrary columns.
+    sidewalks = frames['sidewalks']
+    crossings = frames['crossings']
+    sidewalks_keep = ['geometry', 'incline', 'layer']
+    crossings_keep = ['geometry', 'incline', 'marked', 'curbramps', 'layer']
+    sidewalks_cols = [x for x in sidewalks_keep if x in sidewalks.columns]
+    crossings_cols = [x for x in crossings_keep if x in crossings.columns]
     frames['sidewalks'] = gpd.GeoDataFrame(frames['sidewalks'][sidewalks_cols])
     frames['crossings'] = gpd.GeoDataFrame(frames['crossings'][crossings_cols])
     frames['sidewalks'].crs = sw_crs

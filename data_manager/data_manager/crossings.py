@@ -1,3 +1,4 @@
+import geopandas as gpd
 import numpy as np
 import networkx as nx
 
@@ -20,7 +21,7 @@ def make_graph(streets):
     # Note: streets should be in a projection in meters
 
     # Precision for rounding, in meters. 1 = nearest 10 centimeters.
-    PRECISION = 1
+    PRECISION = 2
 
     G = nx.MultiDiGraph()
     for idx, row in streets.iterrows():
@@ -46,6 +47,28 @@ def make_crossings(sidewalks, streets):
     '''
     # Note: it's assumed that sidewalks and streets are in the same projection,
     # and that its units are meters
+
+    # TODO: use crossify validation functions instead for things like 'layer'
+    def validate_layer(gdf):
+        copy = gdf.copy()
+
+        def transform_layer(layer):
+            if layer is np.nan:
+                return 0
+            try:
+                return int(layer)
+            except ValueError:
+                return 0
+
+        if 'layer' in gdf.columns:
+            copy['layer'] = gdf['layer'].apply(transform_layer)
+        else:
+            copy['layer'] = 0
+        return copy
+
+    streets = validate_layer(streets)
+    sidewalks = validate_layer(sidewalks)
+
     G = make_graph(streets)
     ixns = group_intersections(G)
     crossings = mc2(ixns, sidewalks)
