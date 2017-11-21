@@ -15,6 +15,7 @@ import rasterio as rio
 import sidewalkify
 
 from .annotate import annotate_line_from_points, endpoints_bool
+from . import ped_network
 from .raster_interp import interpolated_value
 from . import fetchers
 from . import dems
@@ -246,71 +247,43 @@ def redraw(pathname):
 @cli.command()
 @click.argument('pathname')
 def annotate(pathname):
-    click.echo('Standardizing data schema')
+    click.echo('Annotating data')
 
     click.echo('    Loading metadata...')
     with open(os.path.join(pathname, 'city.json')) as f:
         sources = json.load(f)
 
-        frames = {}
+        gdfs = {}
         layers = set(sources['layers'].keys())
         primary = set(['sidewalks', 'crossings'])
         # Extract sidewalks and crossings from `redrawn`, everything else from
         # `standardized` directory
         for layer in layers.difference(primary):
-            frames[layer] = get_data(build_dir(pathname), layer,
-                                     'standardized')
+            gdfs[layer] = get_data(build_dir(pathname), layer,
+                                   'standardized')
         for layer in primary:
-            frames[layer] = get_data(build_dir(pathname), layer, 'redrawn')
-
-        # Add incline info to sidewalks, crossings
-        # Read in DEM
-        def interp_line(row):
-            geom = row['geometry']
-            x1, y1 = geom.coords[0][0], geom.coords[0][1]
-            x2, y2 = geom.coords[-1][0], geom.coords[-1][1]
-            start = interpolated_value(x1, y1, dem, dem_arr)
-            end = interpolated_value(x2, y2, dem, dem_arr)
-            incline = (end - start) / row['length']
-
-            return incline
-
-        dem_path = os.path.join(pathname, 'build', 'dems', 'merged.tif')
-
-        with rio.open(dem_path) as dem:
-            click.echo('    Calculating inclines...')
-            # TODO: put elevation stuff in its own function
-            # FIXME: Too much conversion between latlon and UTM!
-            # TODO: Use sample to read data from disk rather than in-memory
-            #       Slower, but small memory footprint
-            dem_arr = dem.read(1)
-
-            for layer in ['sidewalks', 'crossings']:
-                frame = frames[layer].to_crs({'init': 'epsg:26910'})
-                frames[layer]['length'] = frame.geometry.length
-                frame_demcrs = frames[layer].to_crs(dem.crs)
-                frame_incline = frame_demcrs.apply(interp_line, axis=1)
-                frames[layer]['incline'] = frame_incline
-                put_data(frames[layer], build_dir(pathname), layer,
-                         'annotated')
+            gdfs[layer] = get_data(build_dir(pathname), layer, 'redrawn')
 
         annotations = sources.get('annotations')
         click.echo('Annotating...')
         annotated = set([])
         for plan in annotations:
             # Get the data
-            source = frames[plan['source']]
-            target = frames[plan['target']]
+            source = gdfs[plan['source']]
+            target = gdfs[plan['target']]
 
             colname = plan['colname']
+            t = plan['target']
+            s = plan['source']
+            click.echo('    Annotating {} on {} using {}...'.format(colname, t,
+                                                                    s),
+                       nl=False)
 
             # Reproject
             source = source.to_crs({'init': 'epsg:26910'})
             crs = source.crs
 
             # Apply appropriate functions, overwrite layers in 'clean' dir
-            # FIXME: this is hardcoded. Might as well just have a
-            # 'curb ramps' flag instead.
             if plan['method'] == "lines_from_points":
                 # TODO: implement strategy that changes locations of curb
                 # ramps, given that they're derived from inaccurate seattle
@@ -322,53 +295,135 @@ def annotate(pathname):
                 # Fiona driver can't do booleans (even for GeoJSON!), so have
                 # to use ints or write own GeoJSON-writer (wouldn't be so
                 # bad...)
-                frames[plan['target']][colname] = result.astype(int)
+                gdfs[plan['target']][colname] = result.astype(int)
             elif plan['method'] == 'endpoints_bool':
                 result = endpoints_bool(target, source)
-                frames[plan['target']][colname] = result.astype(int)
+                gdfs[plan['target']][colname] = result.astype(int)
 
             target.crs = crs
             annotated.add(plan['target'])
+            click.echo('Done')
 
-        for target in annotated:
-            put_data(frames[target], build_dir(pathname),
-                     target, 'annotated')
+        put_data(gdfs['sidewalks'], build_dir(pathname),
+                 'sidewalks', 'annotated')
+        put_data(gdfs['crossings'], build_dir(pathname),
+                 'crossings', 'annotated')
+
+
+@cli.command()
+@click.argument('pathname')
+def network(pathname):
+    click.echo('Combining into network')
+
+    click.echo('    Loading sidewalks and crossings...', nl=False)
+    sidewalks = get_data(build_dir(pathname), 'sidewalks', 'annotated')
+    crossings = get_data(build_dir(pathname), 'crossings', 'annotated')
+    click.echo('Done')
+
+    click.echo('    Building network...', nl=False)
+    sw_network = ped_network.network_sidewalks(sidewalks, crossings)
+    sw_network.crs = sidewalks.crs
+    click.echo('Done')
+
+    click.echo('    Writing to file...', nl=False)
+    # Note that crossings aren't currently modified, but should still be
+    # written for i/o consistency downstream.
+    put_data(sw_network, build_dir(pathname), 'sidewalk_network', 'annotated')
+    put_data(crossings, build_dir(pathname), 'crossing_network', 'annotated')
+    click.echo('Done')
+
+
+@cli.command()
+@click.argument('pathname')
+def incline(pathname):
+    click.echo('Combining into network')
+
+    click.echo('    Loading sidewalks and crossings...', nl=False)
+    sidewalks = get_data(build_dir(pathname), 'sidewalks', 'annotated')
+
+    crossings = get_data(build_dir(pathname), 'crossings', 'annotated')
+    sw_network = get_data(build_dir(pathname), 'sidewalk_network', 'annotated')
+    cr_network = get_data(build_dir(pathname), 'crossing_network', 'annotated')
+
+    # Note: crossings have been discluded due to irregularities with DEM
+    # data - likely due to insufficiently-flattened buildings. Using a fancier
+    # interpolation method (like bicubic) or smoothing the DEM may help.
+    frames = {
+        'sidewalks': sidewalks,
+        'sidewalk_network': sw_network,
+    }
+    click.echo('Done')
+
+    # Add incline info to sidewalks, crossings
+    # Read in DEM
+    def interp_line(row):
+        geom = row['geometry']
+        x1, y1 = geom.coords[0][0], geom.coords[0][1]
+        x2, y2 = geom.coords[-1][0], geom.coords[-1][1]
+        start = interpolated_value(x1, y1, dem, dem_arr)
+        end = interpolated_value(x2, y2, dem, dem_arr)
+        incline = (end - start) / row['length']
+
+        return incline
+
+    dem_path = os.path.join(pathname, 'build', 'dems', 'merged.tif')
+
+    with rio.open(dem_path) as dem:
+        click.echo('    Calculating inclines...')
+        # TODO: put elevation stuff in its own function
+        # FIXME: Too much conversion between latlon and UTM!
+        # TODO: Use sample to read data from disk rather than in-memory
+        #       Slower, but small memory footprint
+        dem_arr = dem.read(1)
+
+        for layer, gdf in frames.items():
+            frame = frames[layer]
+            frames[layer]['length'] = frame.geometry.length
+            frame_demcrs = frames[layer].to_crs(dem.crs)
+            frame_incline = frame_demcrs.apply(interp_line, axis=1)
+            frames[layer]['incline'] = frame_incline
+            put_data(frames[layer], build_dir(pathname), layer,
+                     'incline')
+    put_data(crossings, build_dir(pathname), 'crossings', 'incline')
+    put_data(cr_network, build_dir(pathname), 'crossing_network',
+             'incline')
 
 
 @cli.command()
 @click.argument('pathname')
 def finalize(pathname):
     click.echo('Finalizing data')
-    frames = {}
-    layers = ['sidewalks', 'crossings']
+    gdfs = {}
+    layers = ['sidewalks', 'crossings', 'sidewalk_network', 'crossing_network']
+    click.echo('    Reading files...', nl=False)
     for layer in layers:
-        frames[layer] = get_data(build_dir(pathname), layer, 'annotated')
-
-    # Also add crossings...
-    frames['crossings'] = get_data(build_dir(pathname), 'crossings',
-                                   'annotated')
-
-    # Reduce columns via whitelist logic
-    sw_crs = frames['sidewalks'].crs
-    cr_crs = frames['crossings'].crs
+        gdfs[layer] = get_data(build_dir(pathname), layer, 'incline')
+    click.echo('Done')
 
     # FIXME: rather than a whitelist, should use a blacklist of columns added
     # as intermediates / never add them in the first place. Other cities may
     # need new / arbitrary columns.
-    sidewalks = frames['sidewalks']
-    crossings = frames['crossings']
-    sidewalks_keep = ['geometry', 'incline', 'layer']
-    crossings_keep = ['geometry', 'incline', 'marked', 'curbramps', 'layer']
-    sidewalks_cols = [x for x in sidewalks_keep if x in sidewalks.columns]
-    crossings_cols = [x for x in crossings_keep if x in crossings.columns]
-    frames['sidewalks'] = gpd.GeoDataFrame(frames['sidewalks'][sidewalks_cols])
-    frames['crossings'] = gpd.GeoDataFrame(frames['crossings'][crossings_cols])
-    frames['sidewalks'].crs = sw_crs
-    frames['crossings'].crs = cr_crs
 
-    for name, gdf in frames.items():
+    click.echo('    Updating schema...', nl=False)
+    # Reduce columns via whitelist logic
+    keep = {}
+    keep['sidewalks'] = set(['geometry', 'incline', 'layer'])
+    keep['crossings'] = set(['geometry', 'incline', 'marked', 'curbramps',
+                             'layer'])
+    keep['sidewalk_network'] = keep['sidewalks']
+    keep['crossing_network'] = keep['crossings']
+
+    for layer, keep_columns in keep.items():
+        gdf = gdfs[layer]
+        crs = gdf.crs
+        columns = list(keep_columns.intersection(gdf.columns))
+        gdf = gpd.GeoDataFrame(gdf[columns])
+        gdf.crs = crs
+
+        # Redundant?
         gdf_wgs84 = gdf.to_crs({'init': 'epsg:4326'})
-        put_data(gdf_wgs84, pathname, name, 'data')
+        put_data(gdf_wgs84, pathname, layer, 'data')
+    click.echo('Done')
 
 
 @cli.command()
@@ -388,6 +443,8 @@ def all(ctx, pathname):
     ctx.forward(standardize)
     ctx.forward(redraw)
     ctx.forward(annotate)
+    ctx.forward(network)
+    ctx.forward(incline)
     ctx.forward(finalize)
 
 
