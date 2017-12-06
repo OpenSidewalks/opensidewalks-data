@@ -6,6 +6,7 @@ requests==2.18.4
 rtree==0.8.3
 Shapely==1.6.2.post1
 rasterio==1.0a10
+scipy==1.0.0
 sidewalkify==0.1.2
 crossify==0.1.3
 networkx==2.0.0

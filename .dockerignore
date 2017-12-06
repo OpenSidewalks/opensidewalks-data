@@ -1,3 +1,4 @@
 venv
+data_manager/venv
 cities
 pgsql_data

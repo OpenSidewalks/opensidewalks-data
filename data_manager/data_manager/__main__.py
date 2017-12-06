@@ -11,12 +11,13 @@ from tempfile import mkdtemp
 
 import click
 import geopandas as gpd
+import pandas as pd
 import rasterio as rio
 import sidewalkify
 
 from .annotate import annotate_line_from_points, endpoints_bool
 from . import ped_network
-from .raster_interp import interpolated_value
+from .raster_interp import elevation_change, split_for_inclines
 from . import fetchers
 from . import dems
 from . import clean as sidewalk_clean
@@ -165,9 +166,9 @@ def standardize(pathname):
     frames['streets'] = whitelist_filter(frames['streets'], st_whitelists)
 
     # FIXME: remove / turn into a debug mode
-    # bounds = (-122.3202, 47.6503, -122.3102, 47.6624)
-    # query = frames['streets'].sindex.intersection(bounds, objects=True)
-    # frames['streets'] = frames['streets'].loc[[q.object for q in query]]
+    bounds = (-122.3202, 47.6503, -122.3102, 47.6624)
+    query = frames['streets'].sindex.intersection(bounds, objects=True)
+    frames['streets'] = frames['streets'].loc[[q.object for q in query]]
 
     # Assign street foreign key to sidewalks, remove sidewalks that don't refer
     # to a street
@@ -329,21 +330,19 @@ def network(pathname):
     # Note that crossings aren't currently modified, but should still be
     # written for i/o consistency downstream.
     put_data(sw_network, build_dir(pathname), 'sidewalk_network', 'annotated')
-    put_data(crossings, build_dir(pathname), 'crossing_network', 'annotated')
     click.echo('Done')
 
 
 @cli.command()
 @click.argument('pathname')
 def incline(pathname):
-    click.echo('Combining into network')
+    click.echo('Calculating inclines...')
 
     click.echo('    Loading sidewalks and crossings...', nl=False)
     sidewalks = get_data(build_dir(pathname), 'sidewalks', 'annotated')
 
     crossings = get_data(build_dir(pathname), 'crossings', 'annotated')
     sw_network = get_data(build_dir(pathname), 'sidewalk_network', 'annotated')
-    cr_network = get_data(build_dir(pathname), 'crossing_network', 'annotated')
 
     # Note: crossings have been discluded due to irregularities with DEM
     # data - likely due to insufficiently-flattened buildings. Using a fancier
@@ -356,37 +355,41 @@ def incline(pathname):
 
     # Add incline info to sidewalks, crossings
     # Read in DEM
-    def interp_line(row):
-        geom = row['geometry']
-        x1, y1 = geom.coords[0][0], geom.coords[0][1]
-        x2, y2 = geom.coords[-1][0], geom.coords[-1][1]
-        start = interpolated_value(x1, y1, dem, dem_arr)
-        end = interpolated_value(x2, y2, dem, dem_arr)
-        incline = (end - start) / row['length']
-
-        return incline
-
     dem_path = os.path.join(pathname, 'build', 'dems', 'merged.tif')
 
     with rio.open(dem_path) as dem:
-        click.echo('    Calculating inclines...')
+        click.echo('    Interpolating elevations...', nl=False)
         # TODO: put elevation stuff in its own function
         # FIXME: Too much conversion between latlon and UTM!
-        # TODO: Use sample to read data from disk rather than in-memory
-        #       Slower, but small memory footprint
-        dem_arr = dem.read(1)
 
+        # NOTE: no crossings get incline information. This is because the DEMs
+        # (even Lidar) are too low of resolution to get accurate values for
+        # short distances, at least using simple interpolation / sampling
+        # methods.
         for layer, gdf in frames.items():
-            frame = frames[layer]
-            frames[layer]['length'] = frame.geometry.length
-            frame_demcrs = frames[layer].to_crs(dem.crs)
-            frame_incline = frame_demcrs.apply(interp_line, axis=1)
-            frames[layer]['incline'] = frame_incline
-            put_data(frames[layer], build_dir(pathname), layer,
-                     'incline')
+            split = []
+            for idx, row in gdf.iterrows():
+                # Ignore non-default-layer ways, for now. Need to create a
+                # surface likelihood estimator for ways using info like
+                # 'is_bridge' or something?
+                if int(row['layer']) == 0:
+                    split.append(split_for_inclines(row))
+
+            split = gpd.GeoDataFrame(pd.concat(split))
+            lengths = split.geometry.length
+
+            split.crs = gdf.crs
+            split_prj = split.to_crs(dem.crs)
+
+            ele_changes = split_prj.geometry.apply(elevation_change,
+                                                   args=[dem])
+
+            split['incline'] = ele_changes / lengths
+
+            put_data(split, build_dir(pathname), layer, 'incline')
+
     put_data(crossings, build_dir(pathname), 'crossings', 'incline')
-    put_data(cr_network, build_dir(pathname), 'crossing_network',
-             'incline')
+    click.echo('Done')
 
 
 @cli.command()
@@ -394,7 +397,7 @@ def incline(pathname):
 def finalize(pathname):
     click.echo('Finalizing data')
     gdfs = {}
-    layers = ['sidewalks', 'crossings', 'sidewalk_network', 'crossing_network']
+    layers = ['sidewalks', 'crossings', 'sidewalk_network']
     click.echo('    Reading files...', nl=False)
     for layer in layers:
         gdfs[layer] = get_data(build_dir(pathname), layer, 'incline')
@@ -411,7 +414,6 @@ def finalize(pathname):
     keep['crossings'] = set(['geometry', 'incline', 'marked', 'curbramps',
                              'layer'])
     keep['sidewalk_network'] = keep['sidewalks']
-    keep['crossing_network'] = keep['crossings']
 
     for layer, keep_columns in keep.items():
         gdf = gdfs[layer]

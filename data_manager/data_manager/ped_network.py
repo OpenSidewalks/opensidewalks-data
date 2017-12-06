@@ -1,7 +1,8 @@
 import geopandas as gpd
 import numpy as np
-import pandas as pd
-from shapely.geometry import LineString, Point
+from shapely.geometry import Point
+
+from .utils import cut
 
 
 def network_sidewalks(sidewalks, crossings, tolerance=1e-1):
@@ -74,21 +75,3 @@ def network_sidewalks(sidewalks, crossings, tolerance=1e-1):
     sidewalks_network.crs = sidewalks.crs
 
     return sidewalks_network
-
-
-def cut(line, distance):
-    # Cuts a line in two at a distance from its starting point
-    if distance <= 0.0 or distance >= line.length:
-        return [LineString(line)]
-    coords = list(line.coords)
-    for i, p in enumerate(coords):
-        pd = line.project(Point(p))
-        if pd == distance:
-            return [
-                LineString(coords[:i+1]),
-                LineString(coords[i:])]
-        if pd > distance:
-            cp = line.interpolate(distance)
-            return [
-                LineString(coords[:i] + [(cp.x, cp.y)]),
-                LineString([(cp.x, cp.y)] + coords[i:])]
