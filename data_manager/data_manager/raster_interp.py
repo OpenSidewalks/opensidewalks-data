@@ -44,7 +44,7 @@ def elevation_change(linestring, dem):
     return end - start
 
 
-def interpolated_value(x, y, dem, method='bilinear'):
+def interpolated_value(x, y, dem, method='bilinear', scaling_factor=1.0):
     '''Given a point (x, y), find the interpolated value in the raster using
     bilinear interpolation.
 
@@ -93,7 +93,7 @@ def interpolated_value(x, y, dem, method='bilinear'):
 
     interpolated = interpolator(dx, dy, dem_arr)
 
-    return interpolated * 0.3
+    return scaling_factor * interpolated
 
 
 def bivariate_spline(dx, dy, arr):
