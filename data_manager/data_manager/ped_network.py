@@ -69,6 +69,11 @@ def network_sidewalks(sidewalks, crossings, tolerance=1e-1):
         for line in lines:
             split = dict(row)
             split['geometry'] = line
+            # Ignore incline for short segments near crossings - these are
+            # usually near intersections and are more flat on average.
+            # (8 meters)
+            if line.length < 8:
+                split['incline'] = 0
             splits.append(split)
 
     sidewalks_network = gpd.GeoDataFrame(splits)

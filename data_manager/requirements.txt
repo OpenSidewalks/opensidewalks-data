@@ -1,6 +1,7 @@
 click==6.7
 geopandas==0.3.0
 numpy==1.13.3
+osmnx==0.6
 pandas==0.21.0
 requests==2.18.4
 rtree==0.8.3
