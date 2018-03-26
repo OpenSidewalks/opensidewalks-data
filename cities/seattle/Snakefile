@@ -1,0 +1,510 @@
+import crossify.intersections
+import crossify.crossings
+from esridump.dumper import EsriDumper
+import geopandas as gpd
+from io import BytesIO
+import json
+import os
+import pandas as pd
+import networkx as nx
+import numpy as np
+import rasterio as rio
+import requests
+import shutil
+import sys
+import sidewalkify
+from shapely.geometry import mapping, Point
+from snakemake.remote.HTTP import RemoteProvider as HTTPRemoteProvider
+import tempfile
+import zipfile
+
+sys.path.append('../../data_manager')
+from data_manager import dems
+
+def gdf_to_geojson(gdf, path):
+    def row_to_feature(row):
+        properties = row.to_dict()
+        properties.pop('geometry')
+        return {
+            'type': 'Feature',
+            'geometry': mapping(row.geometry),
+            'properties': properties
+        }
+
+    fc = {
+        'type': 'FeatureCollection',
+        'features': list(gdf.apply(row_to_feature, axis=1))
+    }
+
+    with open(path, 'w') as f:
+        json.dump(fc, f)
+
+
+def lonlat_to_utm_epsg(lon, lat):
+    utm_zone_epsg = 32700 - 100 * round((45 + lat) / 90.) + \
+        round((183 + lon) / 6.)
+    return utm_zone_epsg
+
+
+rule all:
+    input:
+        expand('interim/redrawn/{layer}.geojson', layer=['sidewalks', 'crossings'])
+
+rule fetch_sidewalks:
+    output:
+        'interim/raw/sidewalks.geojson'
+    run:
+        # OBJECTID Required for esri API to function
+        fields = ['OBJECTID']
+        fields += ['COMPKEY', 'SEGKEY', 'SW_WIDTH', 'WIDTH', 'SURFTYPE', 'SIDE']
+
+        d = EsriDumper('https://gisrevprxy.seattle.gov/arcgis/rest/services/SDOT_EXT/ASSETS/mapserver/2',
+                        fields=fields)
+        geojson = {
+            'type': 'FeatureCollection',
+            'features': list(d)
+        }
+
+        with open('{}'.format(output[0]), 'w') as f:
+            json.dump(geojson, f)
+
+rule fetch_streets:
+    output:
+        'interim/raw/streets.geojson'
+    run:
+        # OBJECTID Required for esri API to function
+        fields = ['OBJECTID']
+        fields += ['COMPKEY', 'STNAME_ORD', 'XSTRHI', 'XSTRLO']
+
+        d = EsriDumper('https://gisrevprxy.seattle.gov/arcgis/rest/services/SDOT_EXT/DSG_datasharing/MapServer/81',
+                       fields=fields)
+        geojson = {
+            'type': 'FeatureCollection',
+            'features': list(d)
+        }
+
+        with open('{}'.format(output[0]), 'w') as f:
+            json.dump(geojson, f)
+
+
+rule fetch_curbramps:
+    output:
+        'interim/raw/curbramps.geojson'
+    run:
+        # OBJECTID Required for esri API to function
+        fields = ['OBJECTID']
+        fields += ['CONDITION', 'CATEGORY']
+
+        d = EsriDumper('https://gisrevprxy.seattle.gov/arcgis/rest/services/SDOT_EXT/ASSETS/mapserver/14',
+                        fields=fields)
+        geojson = {
+            'type': 'FeatureCollection',
+            'features': list(d)
+        }
+
+        with open('{}'.format(output[0]), 'w') as f:
+            json.dump(geojson, f)
+
+
+rule fetch_crosswalks:
+    output:
+        'interim/raw/crosswalks.geojson'
+    run:
+        # OBJECTID Required for esri API to function
+        fields = ['OBJECTID']
+
+        d = EsriDumper('https://gisrevprxy.seattle.gov/arcgis/rest/services/SDOT_EXT/ASSETS/mapserver/9',
+                        fields=fields, extra_query_args={'geometryType': 'esriGeometryPoint'})
+        geojson = {
+            'type': 'FeatureCollection',
+            'features': list(d)
+        }
+
+        with open('{}'.format(output[0]), 'w') as f:
+            json.dump(geojson, f)
+
+
+rule clean_streets:
+    input:
+        'interim/raw/streets.geojson'
+    output:
+        'interim/clean/streets.geojson'
+    run:
+        df = gpd.read_file(input[0])
+
+        # Rename columns to more standardized/semantic names
+        rename = {
+            'COMPKEY': 'pkey',
+            'STNAME_ORD': 'name',
+            'XSTRLO': 'street_low',
+            'XSTRHI': 'street_high'
+        }
+        df = df.rename(columns=rename)
+
+        # Categorize levels (elevated, at-grade, below-grade). Note: the
+        # Seattle Street Network Database (SND) contained this information
+        # directly, but is messy + large + only available as a shapefile. This
+        # strategy, based on street naming conventions, was developed by
+        # comparing street names in this dataset to the SND STRUCTURE_TYPE.
+
+        # Bridges
+        is_br = df.name.str.contains(' BR ') | df.name.str.endswith(' BR')
+        # Viaducts
+        is_vi = df.name.str.contains(' VI ') | df.name.str.endswith(' VI')
+        # On ramps / off ramps
+        is_onrp = df.name.str.contains(' ON RP ') | df.name.str.endswith(' ON RP')
+        is_offrp = df.name.str.contains(' OFF RP ') | df.name.str.endswith(' OFF RP')
+        is_rp = df.name.str.contains(' RP ') | df.name.str.endswith(' RP')
+
+        elevated = df[is_br | is_vi | is_onrp | is_offrp | is_rp]
+
+        # Tunnels
+        below_grade = df[df.name.str.contains('TUNNEL')]
+
+        df['level'] = 0
+        df.loc[elevated.index, 'level'] = 1
+        df.loc[below_grade.index, 'level'] = -1
+
+        # Drop trails
+        df = df[~(df.name.str.contains(' TRL ') | df.name.str.endswith(' TRL'))]
+
+        # Drop the 'OBJECTID' column - it's pointless
+        df = df.drop('OBJECTID', axis=1)
+
+        gdf_to_geojson(df, output[0])
+
+rule clean_sidewalks:
+    input:
+        'interim/raw/sidewalks.geojson'
+    output:
+        'interim/clean/sidewalks.geojson'
+    run:
+        df = gpd.read_file(input[0])
+
+        # Rename columns to more standardized/semantic names
+        rename = {
+            'COMPKEY': 'pkey',
+            'SEGKEY': 'streets_pkey',
+            'SW_WIDTH': 'width',
+            'WIDTH': 'offset',
+            'SURFTYPE': 'surface',
+            'SIDE': 'side'
+        }
+        df = df.rename(columns=rename)
+
+        # Unit conversions
+        df['width'] = df['width'] * 0.0254  # inches to meters
+        df['offset'] = df['offset'] * 0.3048 # feet to meters
+
+        # Map surface values from SDOT keys to OSM keys
+        df['surface2'] = None
+        surface_map = {
+            'AC': 'asphalt',
+            'AC/AC': 'asphalt',
+            'AC/PCC': 'asphalt',
+            'BR': 'paving_stones',
+            'GR': 'gravel',
+            'PCC': 'concrete',
+            'PCC-PAD': 'concrete',
+            'PVAS': 'asphalt',
+            'PVCC': 'concrete',
+            'ST': 'asphalt',
+            'UIMPRV': 'unimproved'
+        }
+        for key, value in surface_map.items():
+            df.loc[(df[df['surface'] == key]).index, 'surface2'] = value
+
+        # Rename temporary surface column back to primary
+        df = df.drop('surface', axis=1)
+        df = df.rename(columns={'surface2': 'surface'})
+
+        # NOTE: SDOT marks sidewalks that don't even exist as 'unimproved'
+        # surfaces. Drop these.
+        df = df.drop(df[df['surface'] == 'unimproved'].index)
+
+        # Drop the 'OBJECTID' column - it's pointless
+        df = df.drop('OBJECTID', axis=1)
+
+        # Drop offsets that make no sense and/or are undocumented
+        df = df[df['offset'].abs() > 1e-2]
+
+        # Drop multiple-entry sidewalks.
+        # FIXME: we need to account for these eventually, but right now it's
+        # only sidewalks for 9 streets that have multiple entries. The reason
+        # there are multiple sidewalks (more than 2) per street is due to
+        # SDOT hacks for linear referencing to the street network.
+        by_street_pkey = df.groupby('streets_pkey').count()['geometry']
+        multiple = df[df['streets_pkey'].isin(by_street_pkey[by_street_pkey > 2].index)]
+        for key, grp in multiple.groupby(['streets_pkey', 'side']):
+            if grp.shape[0] > 1:
+                # More than one sidewalk on this side! Keep only the first entry
+                df = df.drop(grp.iloc[1:].index)
+
+        # Write to file
+        gdf_to_geojson(df, output[0])
+
+rule clean_curbramps:
+    input:
+        'interim/raw/curbramps.geojson'
+    output:
+        'interim/clean/curbramps.geojson'
+    run:
+        df = gpd.read_file(input[0])
+
+        # Remove invalid geometries
+        df = df[df.geometry.notna()]
+
+        gdf_to_geojson(df, output[0])
+
+
+rule clean_crosswalks:
+    input:
+        'interim/raw/crosswalks.geojson'
+    output:
+        'interim/clean/crosswalks.geojson'
+    run:
+        df = gpd.read_file(input[0])
+
+        # Remove invalid geometries
+        df = df[df.geometry.notna()]
+
+        gdf_to_geojson(df, output[0])
+
+
+rule join:
+    input:
+        expand('interim/clean/{layer}.geojson', layer=['sidewalks', 'streets'])
+    output:
+        'interim/joined/sidewalks.geojson'
+    run:
+        sw = gpd.read_file(input[0])
+        st = gpd.read_file(input[1])
+
+        # Drop sidewalks that refer to non-existing streets (according to our
+        # dataset)
+        sw = sw[sw.streets_pkey.isin(st.pkey)]
+
+        # Add street name to sidewalks
+        sw['street_name'] = list(st.set_index('pkey').loc[sw.streets_pkey, 'name'])
+
+        gdf_to_geojson(sw, output[0])
+
+rule draw_sidewalks:
+    input:
+        ['interim/joined/sidewalks.geojson',
+         'interim/clean/streets.geojson']
+    output:
+        'interim/redrawn/sidewalks.geojson'
+    run:
+        sw = gpd.read_file(input[0])
+        st = gpd.read_file(input[1])
+
+        # Prepare for sidewalkify: rows = streets, sw_left + sw_right = offsets
+        left = sw[sw.offset > 0].loc[:, ['geometry', 'offset', 'pkey', 'streets_pkey']]
+        right = sw[sw.offset < 0].loc[:, ['geometry', 'offset', 'pkey', 'streets_pkey']]
+        right.offset = right.offset.abs()
+
+        st_pkey = st.set_index('pkey')
+        left_st = left.set_index('streets_pkey')
+        right_st = right.set_index('streets_pkey')
+
+        st_pkey['sw_left'] = np.nan
+        st_pkey.loc[left_st.index, 'sw_left'] = left_st.offset
+        st_pkey.loc[left_st.index, 'pkey_left'] = left_st.pkey
+
+        st_pkey.loc[right_st.index, 'sw_right'] = right_st.offset
+        st_pkey.loc[right_st.index, 'pkey_right'] = right_st.pkey
+
+        st = st_pkey
+
+        # Reproject into UTM
+        x, y = st.iloc[0]['geometry'].coords[0]
+        utm_zone = lonlat_to_utm_epsg(x, y)
+        st.crs = {'init': 'epsg:4326'}
+        st = st.to_crs({'init': 'epsg:{}'.format(utm_zone)})
+
+        # Draw sidewalks
+        st['id'] = st.index
+        paths = sidewalkify.graph.graph_workflow(st)
+        sidewalks = sidewalkify.draw.draw_sidewalks(paths)
+
+        # Reproject to WGS84
+        sidewalks.crs = {'init': 'epsg:{}'.format(utm_zone)}
+        sidewalks = sidewalks.to_crs({'init': 'epsg:4326'})
+
+        # Update sidewalks with geometries (so that other metadata remains)
+        # Note: 'forward' = 1 from sidewalkify means sidewalk was drawn on the
+        # 'right' side of the street, 'forward' = 0 mean left. The 'street_id'
+        # from sidewalkify corresponds to the input 'id' field, i.e. pkey
+
+        # There are some sidewalks that are missing from the final dataset, for
+        # whatever reason (e.g., they got trimmed down to nothing during final
+        # cleaning step).
+        sw = sw[sw.streets_pkey.isin(sidewalks.street_id)]
+        left = sw.loc[sw[sw.offset > 0].index]
+        right = sw.loc[sw[sw.offset < 0].index]
+
+        sidewalks_l = sidewalks[sidewalks.forward == 0]
+        sidewalks_r = sidewalks[sidewalks.forward == 1]
+
+        geom_l = list(sidewalks_l.set_index('street_id').loc[left.streets_pkey].geometry)
+        left.geometry = geom_l
+
+        geom_r = list(sidewalks_r.set_index('street_id').loc[right.streets_pkey].geometry)
+        right.geometry = geom_r
+
+        sw.loc[left.index, 'geometry'] = left.geometry
+        sw.loc[right.index, 'geometry'] = right.geometry
+
+        sw = sw.drop(columns=['offset'])
+
+        gdf_to_geojson(sw, output[0])
+
+
+rule draw_crossings:
+    input:
+        ['interim/redrawn/sidewalks.geojson',
+         'interim/clean/streets.geojson']
+    output:
+        'interim/redrawn/crossings.geojson'
+    run:
+        sw = gpd.read_file(input[0])
+        st = gpd.read_file(input[1])
+
+        # Drop one boulevard out of each pair
+        # TODO: be more sophisticated. Allow boulevards to have a single
+        # crossing that must intersect both streets
+        for key, grp in st.groupby(['name', 'street_high', 'street_low']):
+            if grp.shape[0] > 1:
+                # Keep the first only
+                st = st.drop(grp.iloc[1:].index)
+
+        # Reproject into UTM
+        x, y = st.iloc[0]['geometry'].coords[0]
+        utm_zone = 'epsg:{}'.format(lonlat_to_utm_epsg(x, y))
+        sw.crs = st.crs = {'init': 'epsg:4326'}
+        sw = sw.to_crs({'init': utm_zone})
+        st = st.to_crs({'init': utm_zone})
+
+
+        def make_graph(streets):
+            PRECISION = 2
+
+            G = nx.MultiDiGraph()
+            for idx, row in streets.iterrows():
+                geometry = row['geometry']
+
+                start = list(np.round(geometry.coords[0], PRECISION))
+                end = list(np.round(geometry.coords[-1], PRECISION))
+
+                start_node = str(start)
+                end_node = str(end)
+
+                G.add_node(start_node, x=start[0], y=start[1])
+                G.add_node(end_node, x=end[0], y=end[1])
+                G.add_edge(start_node, end_node, geometry=geometry)
+
+            return G
+
+
+        # TODO: extract street graph into its own build step?
+        G = make_graph(st)
+        # TODO: make crossify faster
+        ixns = crossify.intersections.group_intersections(G)
+        crossings = crossify.crossings.make_crossings(ixns, sw)
+        crossings.crs = st.crs
+
+        crossings = crossings.to_crs({'init': 'epsg:4326'})
+
+        gdf_to_geojson(crossings, output[0])
+
+
+rule annotate_crossings:
+    input:
+        ['interim/redrawn/crossings.geojson',
+         'interim/clean/curbramps.geojson',
+         'interim/clean/crosswalks.geojson']
+    output:
+        'interim/annotated/crossings.geojson'
+    run:
+        df = gpd.read_file(input[0])
+        cr = gpd.read_file(input[1])
+        cw = gpd.read_file(input[2])
+
+        # Reproject into UTM
+        x, y = df.iloc[0]['geometry'].coords[0]
+        utm_zone = lonlat_to_utm_epsg(x, y)
+        df.crs = cr.crs = cw.crs = {'init': 'epsg:4326'}
+        df = df.to_crs({'init': 'epsg:{}'.format(utm_zone)})
+        cr = cr.to_crs({'init': 'epsg:{}'.format(utm_zone)})
+        cw = cw.to_crs({'init': 'epsg:{}'.format(utm_zone)})
+
+        # Mark as having crosswalks if one is nearby
+        def within_dist(row, dist=3.5, default=None):
+            query = cw.sindex.nearest(row.geometry.bounds, objects=True)
+            bbox_match = cw.loc[(q.object for q in query)]
+            if bbox_match.empty:
+                return default
+            else:
+                return (bbox_match.distance(row.geometry) < dist).any()
+
+        df['marked'] = df.apply(within_dist, axis=1)
+
+        # Mark as having curbramps if there is one near each endpoint.
+        # TODO: move the curb ramp location based on redrawn sidewalks / use
+        # the IDs
+        def has_curbramps(row, dist=3.5):
+            coords = list(row.geometry.coords)
+            start = Point(coords[0])
+            end = Point(coords[-1])
+
+            for point in (start, end):
+                query = cw.sindex.nearest(point.bounds, 1, objects=True)
+                nearest = cw.loc[(q.object for q in query)].iloc[0]
+                if nearest.geometry.distance(point) > dist:
+                    return False
+            return True
+
+        df['curbramps'] = df.apply(has_curbramps, axis=1)
+
+        gdf_to_geojson(df, output[0])
+
+
+rule fetch_dems:
+    input:
+        'interim/redrawn/sidewalks.geojson'
+    output:
+        'interim/dem/dem.tif'
+    run:
+        df = gpd.read_file(input[0])
+
+        url = ('https://prd-tnm.s3.amazonaws.com/StagedProducts/Elevation/13/ArcGrid/n48w123.zip')
+        # TODO: add progress bar using stream argument + click progress bar
+        response = requests.get(url)
+        response.raise_for_status()
+        zipper = zipfile.ZipFile(BytesIO(response.content))
+        extract_dir = 'grdn48w123_13/'
+
+        # Extract everything
+        tempdir = tempfile.mkdtemp()
+        for path in zipper.namelist():
+            if extract_dir in path:
+                if extract_dir == path:
+                    continue
+                extract_path = os.path.join(tempdir, os.path.basename(path))
+                with zipper.open(path) as f:
+                    with open(extract_path, 'wb') as g:
+                        g.write(f.read())
+
+        dem_path = os.path.join(tempdir, 'w001001.adf')
+
+        with rio.open(dem_path) as src:
+            profile = src.profile
+
+            profile.update({'blockysize': 16, 'driver': 'GTiff', 'compress': 'lzw'})
+
+            with rio.open('interim/dem/dem.tif', 'w', **profile) as dst:
+                data = src.read()
+                dst.write(data)
+
+        shutil.rmtree(tempdir)

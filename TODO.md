@@ -1,5 +1,27 @@
 # AccessMap Data Generator TO-DO List
 
+## Match to OSM roads first, then do network, etc.
+
+The SDOT dataset is not aware of several roads, particularly those on large
+piece of public/private property such as UW campus or South Seattle CC. As a
+workaround, the sidewalks dataset will sometimes have multiple entries for a
+single sidewalk along a street, with corresponding offset start/stop distances.
+If you draw a parallel offset at those distances, it kind of approximates
+breaks in the sidewalk.
+
+This poses some issues:
+
+1. It's not spatially accurate
+2. We want to know when someone has to cross the street - i.e. we need the
+real street network to figure out crossing situations, and SDOT is missing
+important bits.
+
+As a workaround, we should do this:
+1. Make an OSM street graph.
+2. Match maps. OSM should generally have more detail, so expect many:1 mappings
+from SDOT:OSM.
+3. Attempt to match specific 'trouble' sidewalks with the street grap
+
 ## Performance
 
 - Optimize `assign sidewalks to side of street` and `crossify`, these are the
