@@ -329,13 +329,6 @@ rule draw_sidewalks:
         paths = sidewalkify.graph.graph_workflow(st)
         sidewalks = sidewalkify.draw.draw_sidewalks(paths)
 
-        # Enrich with 'length' data for re-use later
-        sidewalks['length'] = sidewalks.geometry.apply(lambda x: x.length)
-
-        # Reproject to WGS84
-        sidewalks.crs = {'init': 'epsg:{}'.format(utm_zone)}
-        sidewalks = sidewalks.to_crs({'init': 'epsg:4326'})
-
         # Update sidewalks with geometries (so that other metadata remains)
         # Note: 'forward' = 1 from sidewalkify means sidewalk was drawn on the
         # 'right' side of the street, 'forward' = 0 mean left. The 'street_id'
@@ -361,6 +354,13 @@ rule draw_sidewalks:
         sw.loc[right.index, 'geometry'] = right.geometry
 
         sw = sw.drop(columns=['offset'])
+
+        # Enrich with 'length' data for re-use later
+        sw['length'] = sw.geometry.apply(lambda x: x.length)
+
+        # Reproject to WGS84
+        sw.crs = {'init': 'epsg:{}'.format(utm_zone)}
+        sw = sw.to_crs({'init': 'epsg:4326'})
 
         gdf_to_geojson(sw, output[0])
 
@@ -532,13 +532,13 @@ rule add_inclines:
 
         df['elevation_change'] = df.geometry.apply(elevation_change)
 
-        df['incline'] = df.elevation_change / df.length
+        df['incline'] = df.elevation_change / df['length']
 
         df.drop(columns=['elevation_change'])
 
         # Convert to integer, keep in range [-9999, 9999]
         df.incline = (df.incline * 1000).astype(int)
-        df.incline = df.incline.apply(lambda x: max(min(x, 9999), -9999))
+        df.incline = df.incline.apply(lambda x: min(max(x, -9999), 9999))
 
         gdf_to_geojson(df, output[0])
 
