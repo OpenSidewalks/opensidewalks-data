@@ -9,8 +9,10 @@
 # #
 # arcgis==1.4.0
 esridump==1.7.0
+geobuf=1.1.1
 geopandas==0.3.0
-rasterio==0.36.0
+rasterio==1.0a12
 requests==2.18.4
+scipy==1.0.1
 sidewalkify==0.1.2
 snakemake==4.8.0

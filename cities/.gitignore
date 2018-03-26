@@ -1,5 +1,5 @@
 */*
-!data
-!data/*
+!output
+!output/*
 !city.json
 !Snakefile

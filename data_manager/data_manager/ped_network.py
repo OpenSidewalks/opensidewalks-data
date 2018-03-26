@@ -5,14 +5,13 @@ from shapely.geometry import Point
 from .utils import cut
 
 
-def network_sidewalks(sidewalks, crossings, tolerance=1e-1):
+def network_sidewalks(sidewalks, crossings, tolerance=1e-1, precision=3):
     '''Create a network from (potentially) independently-generated sidewalks
     and crossings lines. Sidewalks will be split into multiple lines wherever
     their endpoints (nearly) intersect crossings on their same layer, within
     some distance tolerance.
 
     '''
-    precision = 3
     ends = []
     for idx, row in crossings.iterrows():
         ends.append(Point(np.round(row['geometry'].coords[0], precision)))
@@ -52,7 +51,8 @@ def network_sidewalks(sidewalks, crossings, tolerance=1e-1):
             distance_along = line.project(point)
 
             # Did you find an endpoint?
-            if (distance_along == 0.0) or (distance_along == line.length):
+            if (distance_along < 0.01) or \
+               (distance_along >= (line.length - 0.01)):
                 continue
 
             distances_along.append(distance_along)

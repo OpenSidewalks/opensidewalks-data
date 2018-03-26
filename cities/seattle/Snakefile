@@ -1,6 +1,7 @@
 import crossify.intersections
 import crossify.crossings
 from esridump.dumper import EsriDumper
+import geobuf
 import geopandas as gpd
 from io import BytesIO
 import json
@@ -19,7 +20,7 @@ import tempfile
 import zipfile
 
 sys.path.append('../../data_manager')
-from data_manager import dems
+from data_manager import dems, ped_network, raster_interp
 
 def gdf_to_geojson(gdf, path):
     def row_to_feature(row):
@@ -328,6 +329,9 @@ rule draw_sidewalks:
         paths = sidewalkify.graph.graph_workflow(st)
         sidewalks = sidewalkify.draw.draw_sidewalks(paths)
 
+        # Enrich with 'length' data for re-use later
+        sidewalks['length'] = sidewalks.geometry.apply(lambda x: x.length)
+
         # Reproject to WGS84
         sidewalks.crs = {'init': 'epsg:{}'.format(utm_zone)}
         sidewalks = sidewalks.to_crs({'init': 'epsg:4326'})
@@ -467,6 +471,9 @@ rule annotate_crossings:
 
         df['curbramps'] = df.apply(has_curbramps, axis=1)
 
+        # Reproject to WGS84
+        df = df.to_crs({'init': 'epsg:4326'})
+
         gdf_to_geojson(df, output[0])
 
 
@@ -474,7 +481,7 @@ rule fetch_dems:
     input:
         'interim/redrawn/sidewalks.geojson'
     output:
-        'interim/dem/dem.tif'
+        protected('interim/dem/dem.tif')
     run:
         df = gpd.read_file(input[0])
 
@@ -508,3 +515,71 @@ rule fetch_dems:
                 dst.write(data)
 
         shutil.rmtree(tempdir)
+
+
+rule add_inclines:
+    input:
+        ['interim/redrawn/sidewalks.geojson',
+         'interim/dem/dem.tif']
+    output:
+        'interim/inclined/sidewalks.geojson'
+    run:
+        df = gpd.read_file(input[0])
+        dem = rio.open(input[1])
+
+        def elevation_change(geometry):
+            return raster_interp.elevation_change(geometry, dem)
+
+        df['elevation_change'] = df.geometry.apply(elevation_change)
+
+        df['incline'] = df.elevation_change / df.length
+
+        df.drop(columns=['elevation_change'])
+
+        # Convert to integer, keep in range [-9999, 9999]
+        df.incline = (df.incline * 1000).astype(int)
+        df.incline = df.incline.apply(lambda x: max(min(x, 9999), -9999))
+
+        gdf_to_geojson(df, output[0])
+
+
+rule network:
+    input:
+        ['interim/inclined/sidewalks.geojson',
+         'interim/annotated/crossings.geojson']
+    output:
+        'interim/networked/sidewalks.geojson'
+    run:
+        sw = gpd.read_file(input[0])
+        cr = gpd.read_file(input[1])
+
+        sw.crs = {'init': 'epsg:4326'}
+        cr.crs = {'init': 'epsg:4326'}
+
+        utm_zone = 'epsg:{}'.format(lonlat_to_utm_epsg(*sw.iloc[0].geometry.coords[0]))
+        sw = sw.to_crs({'init': utm_zone})
+        cr = cr.to_crs({'init': utm_zone})
+
+        sw_network = ped_network.network_sidewalks(sw, cr)
+
+        sw_network.crs = sw.crs
+
+        sw_network = sw_network.to_crs({'init': 'epsg:4326'})
+
+        gdf_to_geojson(sw_network, output[0])
+
+
+rule finalize:
+    input:
+        ['interim/inclined/sidewalks.geojson',
+         'interim/annotated/crossings.geojson',
+         'interim/networked/sidewalks.geojson']
+    output:
+        expand('output/{layer}.pbf', layer=['sidewalks', 'crossings', 'sidewalks_network'])
+    run:
+        for path_in, path_out in zip(input, output):
+            with open(path_in) as f:
+                geojson = json.load(f)
+                pbf = geobuf.encode(geojson)
+            with open(path_out, 'wb') as g:
+                g.write(pbf)
