@@ -651,11 +651,11 @@ rule finalize:
          'interim/networked/elevator_paths.geojson',
          'interim/networked/sidewalks.geojson']
     output:
-        expand('output/{layer}.pbf', layer=['sidewalks', 'crossings', 'elevator_paths', 'sidewalks_network'])
+        expand('output/{layer}.geobuf', layer=['sidewalks', 'crossings', 'elevator_paths', 'sidewalks_network'])
     run:
         for path_in, path_out in zip(input, output):
             with open(path_in) as f:
                 geojson = json.load(f)
-                pbf = geobuf.encode(geojson)
+                buf = geobuf.encode(geojson)
             with open(path_out, 'wb') as g:
-                g.write(pbf)
+                g.write(buf)
