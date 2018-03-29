@@ -49,7 +49,8 @@ def lonlat_to_utm_epsg(lon, lat):
 
 rule all:
     input:
-        expand('interim/redrawn/{layer}.geojson', layer=['sidewalks', 'crossings'])
+        expand('output/{layer}.geobuf', layer=['sidewalks', 'sidewalks_network',
+                                                'crossings', 'elevator_paths'])
 
 rule fetch_sidewalks:
     output:
@@ -388,9 +389,6 @@ rule draw_sidewalks:
 
         sw = sw.drop(columns=['offset'])
 
-        # Enrich with 'length' data for re-use later
-        sw['length'] = sw.geometry.apply(lambda x: x.length)
-
         # Reproject to WGS84
         sw.crs = {'init': 'epsg:{}'.format(utm_zone)}
         sw = sw.to_crs({'init': 'epsg:4326'})
@@ -565,13 +563,20 @@ rule add_inclines:
 
         df['elevation_change'] = df.geometry.apply(elevation_change)
 
-        df['incline'] = df.elevation_change / df['length']
+        x, y = df.iloc[0]['geometry'].coords[0]
+        utm_zone = lonlat_to_utm_epsg(x, y)
+        df.crs = {'init': 'epsg:4326'}
+        df = df.to_crs({'init': 'epsg:{}'.format(utm_zone)})
 
-        df.drop(columns=['elevation_change'])
+        df['len'] = df.geometry.length
+        df['incline'] = df.elevation_change / df['len']
+        df = df.drop(columns=['elevation_change', 'len'])
 
         # Convert to integer, keep in range [-9999, 9999]
         df.incline = (df.incline * 1000).astype(int)
         df.incline = df.incline.apply(lambda x: min(max(x, -9999), 9999))
+
+        df = df.to_crs({'init': 'epsg:4326'})
 
         gdf_to_geojson(df, output[0])
 
@@ -639,10 +644,11 @@ rule network:
 
         # Set short sidewalk paths to 0 incline - they're likely at crossings
         # TODO: fancier / smarter version
-        sw['incline'][sw_network.length < 4] = 0
+        # Calculate new lengths
+        sw_network['length'] = sw_network.geometry.length
+        sw_network.loc[sw_network.length < 4, 'incline'] = 0
 
         sw_network.crs = sw.crs
-
         sw_network = sw_network.to_crs({'init': 'epsg:4326'})
 
         gdf_to_geojson(sw_network, output[0])
