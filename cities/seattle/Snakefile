@@ -637,6 +637,10 @@ rule network:
 
         sw_network = ped_network.network_sidewalks(sw, [cr, el])
 
+        # Set short sidewalk paths to 0 incline - they're likely at crossings
+        # TODO: fancier / smarter version
+        sw['incline'][sw_network.length < 4] = 0
+
         sw_network.crs = sw.crs
 
         sw_network = sw_network.to_crs({'init': 'epsg:4326'})
