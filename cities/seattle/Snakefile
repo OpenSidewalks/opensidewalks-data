@@ -14,7 +14,7 @@ import requests
 import shutil
 import sys
 import sidewalkify
-from shapely.geometry import mapping, Point
+from shapely.geometry import mapping, Point, LineString
 from snakemake.remote.HTTP import RemoteProvider as HTTPRemoteProvider
 import tempfile
 import zipfile
@@ -123,6 +123,39 @@ rule fetch_crosswalks:
 
         with open('{}'.format(output[0]), 'w') as f:
             json.dump(geojson, f)
+
+
+rule read_elevator_paths:
+    input:
+        'input/seattle_elevator_paths.geojson'
+    output:
+        'interim/raw/elevator_paths.geojson'
+    shell: 'cp {input} {output}'
+
+
+rule clean_elevator_paths:
+    input:
+        'interim/raw/elevator_paths.geojson'
+    output:
+        'interim/clean/elevator_paths.geojson'
+    run:
+        df = gpd.read_file('./input/seattle_elevator_paths.geojson')
+
+        # Drop paths that have issues and/or are incomplete
+        df = df[df['keep'] == 1]
+
+        # Decide whether path is indoor (through building) or outdoor
+        df['indoor'] = (df['highway'] == 'corridor').astype(int)
+
+        # Add a 'layer' column set to 0 for downstream processing
+        df['layer'] = 0
+
+        # Rename and keep key columns
+        df = df.rename(columns={'opening_ho': 'opening_hours', 'bld_name': 'via'})
+        df = df[['geometry', 'indoor', 'layer', 'opening_hours', 'via']]
+        df = gpd.GeoDataFrame(df)
+
+        gdf_to_geojson(df, output[0])
 
 
 rule clean_streets:
@@ -543,15 +576,56 @@ rule add_inclines:
         gdf_to_geojson(df, output[0])
 
 
+rule snap_elevator_paths:
+    input:
+        ['interim/clean/elevator_paths.geojson',
+         'interim/inclined/sidewalks.geojson']
+    output:
+        'interim/networked/elevator_paths.geojson'
+    run:
+        el = gpd.read_file(input[0])
+        sw = gpd.read_file(input[1])
+
+        # Find closest sidewalk
+        for idx, row in el.iterrows():
+            coords = list(row.geometry.coords)
+            start = coords[0]
+            end = coords[-1]
+            point_start = Point(start)
+            point_end = Point(end)
+
+            r = 1e-5
+
+            new = []
+            for p in (point_start, point_end):
+                bbox = [p.x - r, p.y - r, p.x + r, p.y + r]
+                query = sw.sindex.intersection(bbox, objects=True)
+                sw_bbox = sw.loc[[q.object for q in query]].geometry
+                closest_dist = sw_bbox.distance(p).sort_values().index[0]
+                closest = sw.loc[closest_dist]
+                new_point = closest.geometry.interpolate(closest.geometry.project(p))
+                new.append(tuple(new_point.coords[0]))
+
+            coords[0] = new[0]
+            coords[-1] = new[1]
+
+            new_geometry = LineString(coords)
+            el.loc[idx, 'geometry'] = new_geometry
+
+        gdf_to_geojson(el, output[0])
+
+
 rule network:
     input:
         ['interim/inclined/sidewalks.geojson',
-         'interim/annotated/crossings.geojson']
+         'interim/annotated/crossings.geojson',
+         'interim/networked/elevator_paths.geojson']
     output:
         'interim/networked/sidewalks.geojson'
     run:
         sw = gpd.read_file(input[0])
         cr = gpd.read_file(input[1])
+        el = gpd.read_file(input[2])
 
         sw.crs = {'init': 'epsg:4326'}
         cr.crs = {'init': 'epsg:4326'}
@@ -559,8 +633,9 @@ rule network:
         utm_zone = 'epsg:{}'.format(lonlat_to_utm_epsg(*sw.iloc[0].geometry.coords[0]))
         sw = sw.to_crs({'init': utm_zone})
         cr = cr.to_crs({'init': utm_zone})
+        el = el.to_crs({'init': utm_zone})
 
-        sw_network = ped_network.network_sidewalks(sw, cr)
+        sw_network = ped_network.network_sidewalks(sw, [cr, el])
 
         sw_network.crs = sw.crs
 
@@ -573,9 +648,10 @@ rule finalize:
     input:
         ['interim/inclined/sidewalks.geojson',
          'interim/annotated/crossings.geojson',
+         'interim/networked/elevator_paths.geojson',
          'interim/networked/sidewalks.geojson']
     output:
-        expand('output/{layer}.pbf', layer=['sidewalks', 'crossings', 'sidewalks_network'])
+        expand('output/{layer}.pbf', layer=['sidewalks', 'crossings', 'elevator_paths', 'sidewalks_network'])
     run:
         for path_in, path_out in zip(input, output):
             with open(path_in) as f:

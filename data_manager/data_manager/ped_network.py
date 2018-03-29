@@ -5,17 +5,18 @@ from shapely.geometry import Point
 from .utils import cut
 
 
-def network_sidewalks(sidewalks, crossings, tolerance=1e-1, precision=3):
+def network_sidewalks(sidewalks, paths_list, tolerance=1e-1, precision=3):
     '''Create a network from (potentially) independently-generated sidewalks
-    and crossings lines. Sidewalks will be split into multiple lines wherever
-    their endpoints (nearly) intersect crossings on their same layer, within
+    and other paths. Sidewalks will be split into multiple lines wherever
+    their endpoints (nearly) intersect other paths on their same layer, within
     some distance tolerance.
 
     '''
     ends = []
-    for idx, row in crossings.iterrows():
-        ends.append(Point(np.round(row['geometry'].coords[0], precision)))
-        ends.append(Point(np.round(row['geometry'].coords[-1], precision)))
+    for paths in paths_list:
+        for idx, row in paths.iterrows():
+            ends.append(Point(np.round(row['geometry'].coords[0], precision)))
+            ends.append(Point(np.round(row['geometry'].coords[-1], precision)))
 
     ends = gpd.GeoDataFrame(geometry=ends)
     ends['wkt'] = ends.geometry.apply(lambda x: x.wkt)
@@ -69,7 +70,7 @@ def network_sidewalks(sidewalks, crossings, tolerance=1e-1, precision=3):
         for line in lines:
             split = dict(row)
             split['geometry'] = line
-            # Ignore incline for short segments near crossings - these are
+            # Ignore incline for short segments near paths - these are
             # usually near intersections and are more flat on average.
             # (8 meters)
             if line.length < 8:
