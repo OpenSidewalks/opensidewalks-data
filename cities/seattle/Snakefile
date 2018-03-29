@@ -490,12 +490,12 @@ rule annotate_crossings:
         # the IDs
         def has_curbramps(row, dist=3.5):
             coords = list(row.geometry.coords)
-            start = Point(coords[0])
-            end = Point(coords[-1])
+            start = Point(*coords[0])
+            end = Point(*coords[-1])
 
             for point in (start, end):
-                query = cw.sindex.nearest(point.bounds, 1, objects=True)
-                nearest = cw.loc[(q.object for q in query)].iloc[0]
+                query = cr.sindex.nearest(point.bounds, 1, objects=True)
+                nearest = cr.loc[(q.object for q in query)].iloc[0]
                 if nearest.geometry.distance(point) > dist:
                     return False
             return True
