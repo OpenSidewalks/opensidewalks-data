@@ -95,14 +95,26 @@ rule fetch_curbramps:
     run:
         # OBJECTID Required for esri API to function
         fields = ['OBJECTID']
-        fields += ['CONDITION', 'CATEGORY']
+        fields += ['CONDITION', 'CATEGORY', 'SW_COMPKEY', 'SW_LOCATION']
 
         d = EsriDumper('https://gisrevprxy.seattle.gov/arcgis/rest/services/SDOT_EXT/ASSETS/mapserver/14',
                         fields=fields)
         geojson = {
             'type': 'FeatureCollection',
-            'features': list(d)
+            'features': []
         }
+
+        for feature in d:
+            geom = feature['geometry']
+            if 'NaN' not in geom['coordinates']:
+                geojson['features'].append(feature)
+
+        # df = gpd.GeoDataFrame.from_features(geojson['features'])
+
+        # df = df.loc[~df.geometry.isnull()]
+        # df = df.loc[df.geometry.is_valid()]
+
+        # gdf_to_geojson(df, output[0])
 
         with open('{}'.format(output[0]), 'w') as f:
             json.dump(geojson, f)
@@ -286,6 +298,10 @@ rule clean_curbramps:
     run:
         df = gpd.read_file(input[0])
 
+        df = df.loc[~df['SW_COMPKEY'].isnull()]
+
+        df = df.rename(columns={'SW_COMPKEY': 'sw_pkey'})
+
         # Remove invalid geometries
         df = df[df.geometry.notna()]
 
@@ -396,6 +412,46 @@ rule draw_sidewalks:
         gdf_to_geojson(sw, output[0])
 
 
+rule adjust_curbramps:
+    input:
+        ['interim/clean/curbramps.geojson',
+         'interim/redrawn/sidewalks.geojson']
+    output:
+        'interim/redrawn/curbramps.geojson'
+    run:
+        df = gpd.read_file(input[0])
+        sw = gpd.read_file(input[1])
+
+        # Adjust curbramps to be at the end of sidewalk lines
+        def adjust(row):
+            loc = row['SW_LOCATION']
+            if loc == 'M':
+                return row.geometry
+
+            sw_pkey = row['sw_pkey']
+            sidewalk = sw.loc[sw.pkey == sw_pkey]
+
+            if sidewalk.shape[0]:
+                sidewalk = sidewalk.iloc[0]
+            else:
+                return row.geometry
+
+            start = Point(sidewalk.geometry.coords[0])
+            end = Point(sidewalk.geometry.coords[-1])
+
+            dist_s = start.distance(row.geometry)
+            dist_e = end.distance(row.geometry)
+
+            if dist_s < dist_e:
+                return start
+            else:
+                return end
+
+        df.geometry = df.apply(adjust, axis=1)
+
+        gdf_to_geojson(df, output[0])
+
+
 rule draw_crossings:
     input:
         ['interim/redrawn/sidewalks.geojson',
@@ -457,7 +513,7 @@ rule draw_crossings:
 rule annotate_crossings:
     input:
         ['interim/redrawn/crossings.geojson',
-         'interim/clean/curbramps.geojson',
+         'interim/redrawn/curbramps.geojson',
          'interim/clean/crosswalks.geojson']
     output:
         'interim/annotated/crossings.geojson'
@@ -486,9 +542,9 @@ rule annotate_crossings:
         df['marked'] = df.apply(within_dist, axis=1)
 
         # Mark as having curbramps if there is one near each endpoint.
-        # TODO: move the curb ramp location based on redrawn sidewalks / use
-        # the IDs
-        def has_curbramps(row, dist=3.5):
+        # TODO: use networky information? Getting a few false negatives when
+        # crossing is a little offset.
+        def has_curbramps(row, dist=5):
             coords = list(row.geometry.coords)
             start = Point(*coords[0])
             end = Point(*coords[-1])
