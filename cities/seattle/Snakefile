@@ -722,6 +722,6 @@ rule finalize:
         for path_in, path_out in zip(input, output):
             with open(path_in) as f:
                 geojson = json.load(f)
-                buf = geobuf.encode(geojson)
+                buf = geobuf.encode(geojson, 7)
             with open(path_out, 'wb') as g:
                 g.write(buf)
