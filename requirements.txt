@@ -9,7 +9,7 @@
 # #
 # arcgis==1.4.0
 esridump==1.7.0
-geobuf=1.1.1
+-e git://github.com/pygeobuf/pygeobuf.git@c9e055ab47532781626cfe2c931a8444820acf05#egg=geobuf
 geopandas==0.3.0
 rasterio==1.0a12
 requests==2.18.4
