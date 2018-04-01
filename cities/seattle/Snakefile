@@ -10,8 +10,6 @@ import pandas as pd
 import networkx as nx
 import numpy as np
 import rasterio as rio
-from rasterio import mask as riomask
-from rasterio import fill as riofill
 import requests
 import scipy
 import shutil
@@ -23,8 +21,10 @@ from snakemake.remote.HTTP import RemoteProvider as HTTPRemoteProvider
 import tempfile
 import zipfile
 
+HTTP = HTTPRemoteProvider()
+
 sys.path.append('../../data_manager')
-from data_manager import dems, ped_network, raster_interp
+from data_manager import dems, fetchers, ped_network, raster_interp
 
 def gdf_to_geojson(gdf, path):
     def row_to_feature(row):
@@ -91,6 +91,15 @@ rule fetch_streets:
 
         with open('{}'.format(output[0]), 'w') as f:
             json.dump(geojson, f)
+
+
+rule fetch_snd:
+    output:
+        'interim/raw/snd.geojson'
+    run:
+        url = 'https://data.seattle.gov/api/views/afip-2mzr/files/08b54e93-1443-4525-9f9a-adf5b03b67d6?filename=Street_Network_Database.zip'
+        df = fetchers.fetch_shapefile(url, 'StatePlane/Street_Network_Database')
+        gdf_to_geojson(df, output[0])
 
 
 rule fetch_curbramps:
@@ -177,11 +186,13 @@ rule clean_elevator_paths:
 
 rule clean_streets:
     input:
-        'interim/raw/streets.geojson'
+        ['interim/raw/streets.geojson',
+         'interim/raw/snd.geojson']
     output:
         'interim/clean/streets.geojson'
     run:
         df = gpd.read_file(input[0])
+        snd = gpd.read_file(input[1])
 
         # Rename columns to more standardized/semantic names
         rename = {
@@ -212,9 +223,15 @@ rule clean_streets:
         # Tunnels
         below_grade = df[df.name.str.contains('TUNNEL')]
 
-        df['level'] = 0
-        df.loc[elevated.index, 'level'] = 1
-        df.loc[below_grade.index, 'level'] = -1
+        df['layer'] = 0
+        df.loc[elevated.index, 'layer'] = 1
+        df.loc[below_grade.index, 'layer'] = -1
+
+        # SND elevation info
+        below = snd.loc[snd.STRUCTURE_ == 0, 'COMPKEY']
+        above = snd.loc[snd.STRUCTURE_ == 2, 'COMPKEY']
+        df.loc[df.pkey.isin(below), 'layer'] = -1
+        df.loc[df.pkey.isin(above), 'layer'] = 1
 
         # Drop trails
         df = df[~(df.name.str.contains(' TRL ') | df.name.str.endswith(' TRL'))]
@@ -511,6 +528,9 @@ rule draw_crossings:
 
         crossings = crossings.to_crs({'init': 'epsg:4326'})
 
+        # Drop temporary columns
+        crossings = crossings.drop(columns=['crossing_distance', 'sw_left', 'sw_right'])
+
         gdf_to_geojson(crossings, output[0])
 
 
@@ -572,7 +592,7 @@ rule fetch_dems:
     input:
         'interim/redrawn/sidewalks.geojson'
     output:
-        protected('interim/dem/dem.tif')
+        'interim/dem/dem.tif'
     run:
         df = gpd.read_file(input[0])
 
