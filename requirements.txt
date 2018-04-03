@@ -1,0 +1,18 @@
+# # arcgis installation is dumb, tries to install its own deps itself. Explicitly installing these will head off most of that.
+# ipywidgets==6.0.1
+# keyring==12.0.0
+# matplotlib==2.2.2
+# notebook==5.4.1
+# pyshp==1.2.12
+# pandas==0.22.0
+# widgetsnbextension==2.0.1
+# #
+# arcgis==1.4.0
+esridump==1.7.0
+-e git://github.com/pygeobuf/pygeobuf.git@c9e055ab47532781626cfe2c931a8444820acf05#egg=geobuf
+geopandas==0.3.0
+rasterio==1.0a12
+requests==2.18.4
+scipy==1.0.1
+sidewalkify==0.1.2
+snakemake==4.8.0
