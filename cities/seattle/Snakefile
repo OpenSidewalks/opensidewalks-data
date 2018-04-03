@@ -80,7 +80,7 @@ rule fetch_streets:
     run:
         # OBJECTID Required for esri API to function
         fields = ['OBJECTID']
-        fields += ['COMPKEY', 'STNAME_ORD', 'XSTRHI', 'XSTRLO']
+        fields += ['COMPKEY', 'STNAME_ORD', 'STREETTYPE', 'XSTRHI', 'XSTRLO']
 
         d = EsriDumper('https://gisrevprxy.seattle.gov/arcgis/rest/services/SDOT_EXT/DSG_datasharing/MapServer/81',
                        fields=fields)
@@ -233,8 +233,21 @@ rule clean_streets:
         df.loc[df.pkey.isin(below), 'layer'] = -1
         df.loc[df.pkey.isin(above), 'layer'] = 1
 
+        # Drop stairs, alleys, walkways, trails
+        codemap = {
+            'alley': 5,
+            'stairs': 6,
+            'walkways': 7,
+            'trails': 8
+        }
+        df = df[~df.pkey.isin(snd.loc[snd.SEGMENT_TY.isin(codemap.values()), 'COMPKEY'])]
+
         # Drop trails
         df = df[~(df.name.str.contains(' TRL ') | df.name.str.endswith(' TRL'))]
+
+        # Drop alleys
+        df = df[~(df.STREETTYPE == 'Alley')]
+        df = df.drop(columns=['STREETTYPE'])
 
         # Drop the 'OBJECTID' column - it's pointless
         df = df.drop('OBJECTID', axis=1)
@@ -295,6 +308,8 @@ rule clean_sidewalks:
 
         # Drop offsets that make no sense and/or are undocumented
         df = df[df['offset'].abs() > 1e-2]
+
+        # TODO: look into 0-width sidewalks. Some just don't exist, others do
 
         # Drop multiple-entry sidewalks.
         # FIXME: we need to account for these eventually, but right now it's
@@ -415,14 +430,14 @@ rule draw_sidewalks:
         sidewalks_l = sidewalks[sidewalks.forward == 0]
         sidewalks_r = sidewalks[sidewalks.forward == 1]
 
-        geom_l = list(sidewalks_l.set_index('street_id').loc[left.streets_pkey].geometry)
-        left.geometry = geom_l
-
-        geom_r = list(sidewalks_r.set_index('street_id').loc[right.streets_pkey].geometry)
-        right.geometry = geom_r
+        left.geometry = list(sidewalks_l.set_index('street_id').loc[left.streets_pkey].geometry)
+        right.geometry = list(sidewalks_r.set_index('street_id').loc[right.streets_pkey].geometry)
 
         sw.loc[left.index, 'geometry'] = left.geometry
         sw.loc[right.index, 'geometry'] = right.geometry
+
+        # Keep layer data
+        sw['layer'] = list(st.loc[sw.streets_pkey, 'layer'])
 
         sw = sw.drop(columns=['offset'])
 
@@ -529,7 +544,9 @@ rule draw_crossings:
         crossings = crossings.to_crs({'init': 'epsg:4326'})
 
         # Drop temporary columns
-        crossings = crossings.drop(columns=['crossing_distance', 'sw_left', 'sw_right'])
+        crossings = crossings.drop(columns=['crossing_distance', 'sw_left',
+                                            'sw_right', 'comp',
+                                            'search_distance', 'dotproduct'])
 
         gdf_to_geojson(crossings, output[0])
 
