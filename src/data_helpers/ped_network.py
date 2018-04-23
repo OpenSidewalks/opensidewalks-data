@@ -2,7 +2,7 @@ import geopandas as gpd
 import numpy as np
 from shapely.geometry import Point
 
-from .utils import cut
+from .geometry import cut
 
 
 def network_sidewalks(sidewalks, paths_list, tolerance=1e-1, precision=3):

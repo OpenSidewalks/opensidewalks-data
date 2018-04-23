@@ -4,7 +4,6 @@ import tempfile
 import shutil
 from zipfile import ZipFile
 
-import click
 import geopandas as gpd
 import requests
 
@@ -35,18 +34,3 @@ def fetch_shapefile(url, shp_path, bounds=None):
         gdf = gdf.loc[[q.object for q in query]]
 
     return gdf
-
-
-def fetch(metadata):
-    layers = {}
-    # FIXME: do this asynchronously - the slowest part is often waiting for the
-    # server to respond. If multiprocessing is used, will be compatible with
-    # Python 2 and Python 3
-    for name, layer in metadata['layers'].items():
-        click.echo('Downloading {}...'.format(name))
-        url = layer['url']
-        click.echo(url)
-        layers[name] = fetch_shapefile(url, layer['shapefile'],
-                                       metadata['bounds'])
-
-    return layers

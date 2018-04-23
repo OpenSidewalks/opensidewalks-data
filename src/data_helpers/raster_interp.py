@@ -4,7 +4,7 @@ import numpy as np
 from scipy.interpolate import RectBivariateSpline
 from rasterio.windows import Window
 
-from .utils import cut
+from .geometry import cut
 
 
 def split_for_inclines(row):
