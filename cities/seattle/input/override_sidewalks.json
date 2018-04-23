@@ -1,0 +1,32 @@
+{
+  "remove": [
+    331171
+  ],
+  "add": [{
+    "geometry": {
+      "type": "LineString",
+      "coordinates": [
+        [-122.319773595970858, 47.661399655055732 ],
+        [ -122.319643525814513, 47.661401344278538 ]
+      ]
+    },
+    "offset": 9.6012,
+    "side": "N",
+    "streets_pkey": 337051,
+    "surface": "concrete",
+    "width": 1.6764
+  }, {
+    "geometry": {
+      "type": "LineString",
+      "coordinates": [
+        [-122.319721230063749, 47.661225665106336 ],
+        [ -122.319548929337174, 47.661229043551955 ]
+      ]
+    },
+    "offset": -9.2964,
+    "side": "S",
+    "streets_pkey": 337051,
+    "surface": "concrete",
+    "width": 1.8288
+  }]
+}

@@ -15,7 +15,7 @@ import scipy
 import shutil
 import sys
 import sidewalkify
-from shapely.geometry import mapping
+from shapely.geometry import mapping, shape
 from shapely.geometry import Point, LinearRing, LineString, MultiPoint, Polygon
 from snakemake.remote.HTTP import RemoteProvider as HTTPRemoteProvider
 import tempfile
@@ -28,7 +28,7 @@ from data_manager import dems, fetchers, ped_network, raster_interp
 
 def gdf_to_geojson(gdf, path):
     def row_to_feature(row):
-        properties = row.to_dict()
+        properties = row.loc[~row.isna()].to_dict()
         properties.pop('geometry')
         return {
             'type': 'Feature',
@@ -357,10 +357,53 @@ rule clean_crosswalks:
 
         gdf_to_geojson(df, output[0])
 
+rule override_streets:
+    input:
+        ['interim/clean/streets.geojson',
+         'input/override_streets.json']
+    output:
+        'interim/overridden/streets.geojson'
+    run:
+        df = gpd.read_file(input[0])
+
+        # Specific overrides due to errors in the SDOT dataset
+        with open(input[1]) as f:
+            overrides = json.load(f)
+            if 'layer' in overrides:
+                for layer, pkeys in overrides['layer'].items():
+                    df.loc[pkeys, 'layer'] = int(layer)
+
+        gdf_to_geojson(df, output[0])
+
+rule override_sidewalks:
+    input:
+        ['interim/clean/sidewalks.geojson',
+         'input/override_sidewalks.json']
+    output:
+        'interim/overridden/sidewalks.geojson'
+    run:
+        df = gpd.read_file(input[0])
+
+        # Drop flagged 'bad data' sidewalks
+        with open(input[1]) as f:
+            override = json.load(f)
+
+        to_remove = override['remove']
+        df = df.loc[~df['pkey'].isin(to_remove)]
+
+        to_add = override['add']
+        for i, entry in enumerate(to_add):
+            id = -(i + 1)
+            entry['pkey'] = id
+            entry['geometry'] = shape(entry['geometry'])
+            df.loc[id] = entry
+
+        gdf_to_geojson(df, output[0])
 
 rule join:
     input:
-        expand('interim/clean/{layer}.geojson', layer=['sidewalks', 'streets'])
+        ['interim/overridden/sidewalks.geojson',
+         'interim/overridden/streets.geojson']
     output:
         'interim/joined/sidewalks.geojson'
     run:
@@ -379,9 +422,10 @@ rule join:
 rule draw_sidewalks:
     input:
         ['interim/joined/sidewalks.geojson',
-         'interim/clean/streets.geojson']
+         'interim/overridden/streets.geojson']
     output:
-        'interim/redrawn/sidewalks.geojson'
+        ['interim/redrawn/sidewalks.geojson',
+         'interim/redrawn/streets.geojson']
     run:
         sw = gpd.read_file(input[0])
         st = gpd.read_file(input[1])
@@ -404,6 +448,11 @@ rule draw_sidewalks:
 
         st = st_pkey
 
+        # Restrict to udistrict temporarily (for testing purposes only)
+        # bbox = [-122.3228, 47.6500, -122.3049, 47.6635]
+        # idx = [q.object for q in st.sindex.intersection(bbox, objects=True)]
+        # st = st.loc[idx]
+
         # Reproject into UTM
         x, y = st.iloc[0]['geometry'].coords[0]
         utm_zone = lonlat_to_utm_epsg(x, y)
@@ -413,39 +462,75 @@ rule draw_sidewalks:
         # Draw sidewalks
         st['id'] = st.index
         paths = sidewalkify.graph.graph_workflow(st)
-        sidewalks = sidewalkify.draw.draw_sidewalks(paths)
+        redrawn = sidewalkify.draw.draw_sidewalks(paths)
 
-        # Update sidewalks with geometries (so that other metadata remains)
+
+        rows = []
+        for i, path in enumerate(paths):
+            n = i
+            geom = LineString([node for node in path['nodes']])
+            rows.append({
+                'n': n,
+                'geometry': geom
+            })
+        df_paths = gpd.GeoDataFrame(rows)
+        df_paths.crs = {'init': 'epsg:{}'.format(utm_zone)}
+        df_paths = df_paths.to_crs({'init': 'epsg:4326'})
+
+        gdf_to_geojson(df_paths, 'test_paths.geojson')
+
+        # Reproject to WGS84
+        redrawn.crs = {'init': 'epsg:{}'.format(utm_zone)}
+        redrawn = redrawn.to_crs({'init': 'epsg:4326'})
+
+        # gdf_to_geojson(redrawn, output[0])
+
+        # Update redrawn with geometries (so that other metadata remains)
         # Note: 'forward' = 1 from sidewalkify means sidewalk was drawn on the
         # 'right' side of the street, 'forward' = 0 mean left. The 'street_id'
         # from sidewalkify corresponds to the input 'id' field, i.e. pkey
 
-        # There are some sidewalks that are missing from the final dataset, for
+        # There are some redrawn that are missing from the final dataset, for
         # whatever reason (e.g., they got trimmed down to nothing during final
         # cleaning step).
-        sw = sw[sw.streets_pkey.isin(sidewalks.street_id)]
-        left = sw.loc[sw[sw.offset > 0].index]
-        right = sw.loc[sw[sw.offset < 0].index]
+        sw = sw[sw.streets_pkey.isin(redrawn.street_id)]
+        sw.loc[sw.offset < 0, 'forward'] = 0
+        sw.loc[sw.offset >= 0, 'forward'] = 1
 
-        sidewalks_l = sidewalks[sidewalks.forward == 0]
-        sidewalks_r = sidewalks[sidewalks.forward == 1]
+        # Update initial sw dataset with redrawn sidewalk lines
+        def update(row):
+            street_match = redrawn.street_id == row.streets_pkey
+            side_match = row.forward == redrawn.forward
+            both = street_match & side_match
+            indices = redrawn.index[both].tolist()
+            if indices:
+                sw.at[row.name, 'geometry'] = redrawn.loc[indices[0], 'geometry']
+            else:
+                sw.at[row.name, 'geometry'] = None
 
-        left.geometry = list(sidewalks_l.set_index('street_id').loc[left.streets_pkey].geometry)
-        right.geometry = list(sidewalks_r.set_index('street_id').loc[right.streets_pkey].geometry)
+        sw.apply(update, axis=1)
 
-        sw.loc[left.index, 'geometry'] = left.geometry
-        sw.loc[right.index, 'geometry'] = right.geometry
+        sw = sw.loc[~sw.geometry.isnull()]
+
+        # left_st = left.streets_pkey[left.streets_pkey.isin(redrawn_l.street_id)]
+
+        # print(redrawn_l.set_index('street_id').loc[left_st].geometry)
+        # left.geometry = list(redrawn_l.set_index('street_id').loc[left_st].geometry)
+        # right.geometry = list(redrawn_r.set_index('street_id').loc[right.streets_pkey].geometry)
+
+        # sw.loc[left.index, 'geometry'] = left.geometry
+        # sw.loc[right.index, 'geometry'] = right.geometry
 
         # Keep layer data
         sw['layer'] = list(st.loc[sw.streets_pkey, 'layer'])
 
         sw = sw.drop(columns=['offset'])
 
-        # Reproject to WGS84
-        sw.crs = {'init': 'epsg:{}'.format(utm_zone)}
-        sw = sw.to_crs({'init': 'epsg:4326'})
-
         gdf_to_geojson(sw, output[0])
+
+        st.crs = {'init': 'epsg:{}'.format(utm_zone)}
+        st = st.to_crs({'init': 'epsg:4326'})
+        gdf_to_geojson(st, output[1])
 
 
 rule adjust_curbramps:
@@ -491,16 +576,15 @@ rule adjust_curbramps:
 rule draw_crossings:
     input:
         ['interim/redrawn/sidewalks.geojson',
-         'interim/clean/streets.geojson']
+         'interim/overridden/streets.geojson']
     output:
         'interim/redrawn/crossings.geojson'
     run:
         sw = gpd.read_file(input[0])
         st = gpd.read_file(input[1])
 
-        # Drop one boulevard out of each pair
-        # TODO: be more sophisticated. Allow boulevards to have a single
-        # crossing that must intersect both streets
+        # FIXME: This is for dropping one street per boulevard, but that is not
+        # a working strategy for handling crossings. Revisit!
         for key, grp in st.groupby(['name', 'street_high', 'street_low']):
             if grp.shape[0] > 1:
                 # Keep the first only
@@ -648,7 +732,7 @@ rule fetch_dems:
 rule intersection_elevations:
     input:
         ['interim/dem/dem.tif',
-         'interim/clean/streets.geojson']
+         'interim/overridden/streets.geojson']
     output:
         'interim/dem/intersection_elevations.geojson'
     run:
