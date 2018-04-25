@@ -548,19 +548,32 @@ rule adjust_curbramps:
 rule draw_crossings:
     input:
         ['interim/redrawn/sidewalks.geojson',
-         'interim/overridden/streets.geojson']
+         'interim/redrawn/streets.geojson']
     output:
         'interim/redrawn/crossings.geojson'
     run:
         sw = gpd.read_file(input[0])
         st = gpd.read_file(input[1])
 
+        sw.pkey = sw.pkey.astype(float)
+        st.pkey_left = st.pkey_left.astype(float)
+        st.pkey_right = st.pkey_right.astype(float)
+
+        # Restrict to udistrict temporarily (for testing purposes only)
+        # bbox = [-122.3228, 47.6500, -122.3049, 47.6635]
+        # idx = [q.object for q in st.sindex.intersection(bbox, objects=True)]
+        # st = st.loc[idx]
+
+        # Set sidewalk IDs to None if they're not in the sw dataset
+        st.loc[~st.pkey_left.isin(sw.pkey), 'pkey_left'] = np.nan
+        st.loc[~st.pkey_right.isin(sw.pkey), 'pkey_right'] = np.nan
+
         # FIXME: This is for dropping one street per boulevard, but that is not
         # a working strategy for handling crossings. Revisit!
-        for key, grp in st.groupby(['name', 'street_high', 'street_low']):
-            if grp.shape[0] > 1:
-                # Keep the first only
-                st = st.drop(grp.iloc[1:].index)
+        # for key, grp in st.groupby(['name', 'street_high', 'street_low']):
+        #     if grp.shape[0] > 1:
+        #         # Keep the first only
+        #         st = st.drop(grp.iloc[1:].index)
 
         # Reproject into UTM
         x, y = st.iloc[0]['geometry'].coords[0]
@@ -569,41 +582,111 @@ rule draw_crossings:
         sw = sw.to_crs({'init': utm_zone})
         st = st.to_crs({'init': utm_zone})
 
+        keep = ['id', 'pkey_left', 'pkey_right']
+        swap = [['pkey_left', 'pkey_right']]
+        G = dh.circular_ordered_graph.circular_ordered_graph(st, 2, keep, swap)
 
-        def make_graph(streets):
-            PRECISION = 2
+        # FIXME: Treat streets with very similar azimuths and no 'in-between'
+        # sidewalks as a single edge for crossings
 
-            G = nx.MultiDiGraph()
-            for idx, row in streets.iterrows():
-                geometry = row['geometry']
+        # Use graph data to add crossings per-street
+        rows = []
+        for u, v, k, d in G.edges(data=True, keys=True):
+            if G.degree(u) < 5:
+                # Skip dead ends and continuing streets
+                continue
 
-                start = list(np.round(geometry.coords[0], PRECISION))
-                end = list(np.round(geometry.coords[-1], PRECISION))
+            edges = G.nodes[u]['sorted_edges']
+            n = len(edges)
+            idx = edges.index((v, k))
 
-                start_node = str(start)
-                end_node = str(end)
+            # Find left and right streets
+            left_v, left_j = edges[idx - 1]
+            right_v, right_j = edges[(idx + 1) % n]
+            left = G[u][left_v][left_j]
+            right = G[u][right_v][right_j]
 
-                G.add_node(start_node, x=start[0], y=start[1])
-                G.add_node(end_node, x=end[0], y=end[1])
-                G.add_edge(start_node, end_node, geometry=geometry)
+            # TODO: refactor - super redundant
+            # Note: the 'forward' check here has the reversed logic because
+            # a 'left-hand' sidewalk will have been drawn in the opposite
+            # direction
+            if not np.isnan(d['pkey_left']):
+                matches = sw.loc[sw.pkey == d['pkey_left'], 'geometry']
+                geom = matches.iloc[0]
+                if d['forward']:
+                    corner_left = Point(geom.coords[0])
+                else:
+                    corner_left = Point(geom.coords[0])
+            else:
+                if not np.isnan(left['pkey_right']):
+                    matches = sw.loc[sw.pkey == left['pkey_right'], 'geometry']
+                    geom = matches.iloc[0]
+                    if left['forward']:
+                        corner_left = Point(geom.coords[-1])
+                    else:
+                        corner_left = Point(geom.coords[-1])
+                else:
+                    # There isn't a corner at all
+                    continue
 
-            return G
+            if not np.isnan(d['pkey_right']):
+                matches = sw.loc[sw.pkey == d['pkey_right'], 'geometry']
+                geom = matches.iloc[0]
+                if d['forward']:
+                    corner_right = Point(geom.coords[-1])
+                else:
+                    corner_right = Point(geom.coords[-1])
+            else:
+                if not np.isnan(right['pkey_left']):
+                    matches = sw.loc[sw.pkey == right['pkey_left'], 'geometry']
+                    geom = matches.iloc[0]
+                    if right['forward']:
+                        corner_right = Point(geom.coords[0])
+                    else:
+                        corner_right = Point(geom.coords[0])
+                else:
+                    # There isn't a corner at all
+                    continue
 
+            # Check for 'T' intersections, 'straighten' crossings at them
+            # TODO: this step can probably be moved earlier (within
+            # conditionals above)
+            dleft = (d['azimuth'] - left['azimuth']) % 360
+            dright = (d['azimuth'] - right['azimuth']) % 360
 
-        # TODO: extract street graph into its own build step?
-        G = make_graph(st)
-        # TODO: make crossify faster
-        ixns = crossify.intersections.group_intersections(G)
-        crossings = crossify.crossings.make_crossings(ixns, sw)
+            # FIXME: assing curb ramps yes/no before this, as SDOT's only
+            # geographical info is via metadata. Alternatively, assing curb
+            # ramps using only metadata in later steps.
+            if (dleft > 160) and (dleft < 200):
+                # They're basically parallel - it's a T intersection ending on
+                # the left. Adjust the 'left' corner to be whatever point on
+                # the left sidewalk is closest to the 'right' corner.
+                matches = sw.loc[sw.pkey == d['pkey_left'], 'geometry']
+                if matches.shape[0]:
+                    geom = matches.iloc[0]
+                    corner_left = geom.interpolate(geom.project(corner_right))
+
+            if (dright > 160) and (dright < 200):
+                # They're basically parallel - it's a T intersection ending on
+                # the right. Adjust the 'right' corner to be whatever point on
+                # the right sidewalk is closest to the 'left' corner.
+                matches = sw.loc[sw.pkey == d['pkey_right'], 'geometry']
+                if matches.shape[0]:
+                    geom = matches.iloc[0]
+                    corner_right = geom.interpolate(geom.project(corner_left))
+
+            # The crossing is just connected corners. This is the step
+            # where some constraints can be added.
+            crossing_geom = LineString([corner_left, corner_right])
+            rows.append({
+                'geometry': crossing_geom,
+                'st_id': d['id'],
+            })
+
+        crossings = gpd.GeoDataFrame(rows)
+
         crossings.crs = st.crs
-
         crossings = crossings.to_crs({'init': 'epsg:4326'})
-
-        # Drop temporary columns
-        crossings = crossings.drop(columns=['crossing_distance', 'sw_left',
-                                            'sw_right', 'comp',
-                                            'search_distance', 'dotproduct'])
-
         dh.io.gdf_to_geojson(crossings, output[0])
 
 

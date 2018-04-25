@@ -1,5 +1,89 @@
 # AccessMap Data Generator TO-DO List
 
+## Stay on 'street network' longer, use to stage crossings
+
+Attempting to draw crossings from sidewalk lines and streets, sans metadata
+on street associations, has some serious and possibly insurmoountable problems
+given the incompleteness and differences between maps. Examples:
+
+  - SDOT errors. The street locations suggested by SDOT's streets dataset, and
+  the Street Network Database, can be off by 10+ meters in ways that make
+  sidewalk locations absurd. As a consequence, sidewalks get placed on the
+  opposite side of nearby streets from where they should be.
+
+  - Boulevards. Staging a crossing for a boulevard requires some street
+  network-level interpretations: the two streets in a boulevard have the same
+  network connections, just in opposite orientation (one-way streets), and the
+  locations they intersect should be considered *one* intersection, not two.
+  This idea follows from how osmnx treats them, but is very relevant to our
+  issues with crossings.
+
+  - Partial / missing sidewalks. An example is near the University Bridge,
+  near the first turn-off heading south on Roosevelt. There's a small 'island'
+  near an intersection, and only one half has sidewalks. Nevertheless, we're
+  adding crossings that go from one sidewalk, across the street, then across
+  grass and trees, to a sidewalk associated with a different street. This can
+  be avoided if we pre-decide the sidewlaks to connect from a street network-
+  associated description.
+
+  - z-layer inconsistencies. We can completely ignore z-layer differences by
+  looking at the street network intersections first, and just jogging up x
+  meters to an initial approximation of the crossing point.
+
+The proposed new strategy looks like this:
+
+  1. Associate each sidewalk with street (already done in current workflow)
+
+  2. Derive intersections from street network (also done in current workflow)
+
+  3. Group intersections to deal with boulevards, etc.
+
+  4. Add associated street information to the intersections.
+
+  5. Iterate over each associated street:
+    1. Travel at most half-way down the street, minimum X meters away from the
+       intersection. X can be parameterized/informed by associated street
+       widths.
+
+    2. Find the first street segment with sidewalk associated with both sides.
+
+    3. This is the first approximation of the crossing location. It has this
+       information:
+
+       - The associated street (ID)
+       - The associated sidewalks (ID)
+       - The associated intersection (ID)
+
+    4. (optional) attempt to associate metadata from SDOT at this point as well
+    such as marked/unmarked, signalization, etc.
+
+  6. For every initial crossing location, attempt to draw an actual crossing by
+  finding the closest points on the associated sidewalks / some other strategy
+
+    - Addendum: This doesn't handle the situation where, e.g., there should
+    be a crossing between sidewalks associated with orthogonal streets. e.g.,
+    these cases:
+      - There is a sidewalk on the 'left' side of a street, and not the right,
+      but there is a sidewalk approach from the right on the neighboring street.
+      - There are no sidewalks on the left or right of the street, but there
+      should still be a crossing to connect sidewalks on the 'top' of an
+      orthogonal street.
+
+      - Potential solution: attempt to identify corners, accounting for:
+        - The two (potential) sidewalks on each side of the street of interest
+        - The neighboring sidewalks
+        - Need to strategize about boulevards
+
+
+This strategy should be much faster than the current solution, which is also
+the bottleneck of our build process. It should also lead to fewer data errors.
+
+The primary downside is that it requires an associated between a sidewalk and
+a street, something we have not properly addressed in OpenStreetMap. With that
+said, we can get away with it because it's meant for use with AccessMap, and
+for staging data for later use in OpenStreetMap, and does not need to derive
+from OSM itself.
+
 ## Match to OSM roads first, then do network, etc.
 
 The SDOT dataset is not aware of several roads, particularly those on large
