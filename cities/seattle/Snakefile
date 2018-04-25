@@ -80,7 +80,8 @@ rule fetch_curbramps:
     run:
         # OBJECTID Required for esri API to function
         fields = ['OBJECTID']
-        fields += ['CONDITION', 'CATEGORY', 'SW_COMPKEY', 'SW_LOCATION']
+        fields += ['COLOR', 'CONDITION', 'CATEGORY', 'DIRECTION', 'RAMP_WIDTH',
+                   'STYLE', 'SW_COMPKEY', 'SW_LOCATION']
 
         d = EsriDumper('https://gisrevprxy.seattle.gov/arcgis/rest/services/SDOT_EXT/ASSETS/mapserver/14',
                         fields=fields)
@@ -515,32 +516,47 @@ rule adjust_curbramps:
         df = gpd.read_file(input[0])
         sw = gpd.read_file(input[1])
 
-        # Adjust curbramps to be at the end of sidewalk lines
-        def adjust(row):
-            loc = row['SW_LOCATION']
+        # Assign curbramps to sidewalk line start/mid/end
+        def identify_position(cr_row):
+            loc = cr_row['SW_LOCATION']
             if loc == 'M':
-                return row.geometry
+                return 'mid'
 
-            sw_pkey = row['sw_pkey']
+            sw_pkey = cr_row['sw_pkey']
             sidewalk = sw.loc[sw.pkey == sw_pkey]
 
             if sidewalk.shape[0]:
                 sidewalk = sidewalk.iloc[0]
             else:
-                return row.geometry
+                return 'none'
 
             start = Point(sidewalk.geometry.coords[0])
             end = Point(sidewalk.geometry.coords[-1])
 
-            dist_s = start.distance(row.geometry)
-            dist_e = end.distance(row.geometry)
+            dist_s = start.distance(cr_row.geometry)
+            dist_e = end.distance(cr_row.geometry)
 
             if dist_s < dist_e:
-                return start
+                return 'start'
             else:
-                return end
+                return 'end'
 
-        df.geometry = df.apply(adjust, axis=1)
+        # Adjust curb ramp positions
+        def adjust(cr_row):
+            sw_pkey = cr_row['sw_pkey']
+            sidewalk = sw.loc[sw.pkey == sw_pkey].iloc[0]
+
+            if cr_row['position'] == 'start':
+                return Point(sidewalk.geometry.coords[0])
+            elif cr_row['position'] == 'end':
+                return Point(sidewalk.geometry.coords[-1])
+            else:
+                return sidewalk.geometry.interpolate(0.5, normalized=True)
+
+        df = df.loc[df['sw_pkey'].isin(sw['pkey'])]
+        df['position'] = df.apply(identify_position, axis=1)
+        df = df.loc[df['position'] != 'none']
+        df['geometry'] = df.apply(adjust, axis=1)
 
         dh.io.gdf_to_geojson(df, output[0])
 
@@ -589,7 +605,18 @@ rule draw_crossings:
         # FIXME: Treat streets with very similar azimuths and no 'in-between'
         # sidewalks as a single edge for crossings
 
+        def extract_corner(sw_pkey, keep_index):
+            if np.isnan(sw_pkey):
+                return None
+            matches = sw.loc[sw.pkey == sw_pkey, 'geometry']
+            if matches.shape[0]:
+                geometry = matches.iloc[0]
+                return Point(geometry.coords[keep_index])
+            return None
+
+
         # Use graph data to add crossings per-street
+        T_range = [160, 200]
         rows = []
         for u, v, k, d in G.edges(data=True, keys=True):
             if G.degree(u) < 5:
@@ -601,86 +628,57 @@ rule draw_crossings:
             idx = edges.index((v, k))
 
             # Find left and right streets
-            left_v, left_j = edges[idx - 1]
-            right_v, right_j = edges[(idx + 1) % n]
-            left = G[u][left_v][left_j]
-            right = G[u][right_v][right_j]
+            ccw_v, ccw_j = edges[idx - 1]
+            cw_v, cw_j = edges[(idx + 1) % n]
+            ccw = G[u][ccw_v][ccw_j]
+            cw = G[u][cw_v][cw_j]
 
-            # TODO: refactor - super redundant
-            # Note: the 'forward' check here has the reversed logic because
-            # a 'left-hand' sidewalk will have been drawn in the opposite
-            # direction
-            if not np.isnan(d['pkey_left']):
-                matches = sw.loc[sw.pkey == d['pkey_left'], 'geometry']
-                geom = matches.iloc[0]
-                if d['forward']:
-                    corner_left = Point(geom.coords[0])
-                else:
-                    corner_left = Point(geom.coords[0])
-            else:
-                if not np.isnan(left['pkey_right']):
-                    matches = sw.loc[sw.pkey == left['pkey_right'], 'geometry']
-                    geom = matches.iloc[0]
-                    if left['forward']:
-                        corner_left = Point(geom.coords[-1])
-                    else:
-                        corner_left = Point(geom.coords[-1])
-                else:
-                    # There isn't a corner at all
-                    continue
+            corner_ccw = extract_corner(d['pkey_left'], 0)
+            if corner_ccw is None:
+                corner_ccw = extract_corner(ccw['pkey_right'], -1)
+            if corner_ccw is None:
+                # There's no corner on the counter-clockwise side at all
+                continue
 
-            if not np.isnan(d['pkey_right']):
-                matches = sw.loc[sw.pkey == d['pkey_right'], 'geometry']
-                geom = matches.iloc[0]
-                if d['forward']:
-                    corner_right = Point(geom.coords[-1])
-                else:
-                    corner_right = Point(geom.coords[-1])
-            else:
-                if not np.isnan(right['pkey_left']):
-                    matches = sw.loc[sw.pkey == right['pkey_left'], 'geometry']
-                    geom = matches.iloc[0]
-                    if right['forward']:
-                        corner_right = Point(geom.coords[0])
-                    else:
-                        corner_right = Point(geom.coords[0])
-                else:
-                    # There isn't a corner at all
-                    continue
+            corner_cw = extract_corner(d['pkey_right'], -1)
+            if corner_cw is None:
+                corner_cw = extract_corner(cw['pkey_left'], 0)
+            if corner_cw is None:
+                # There's no corner on the counter-clockwise side at all
+                continue
 
             # Check for 'T' intersections, 'straighten' crossings at them
-            # TODO: this step can probably be moved earlier (within
-            # conditionals above)
-            dleft = (d['azimuth'] - left['azimuth']) % 360
-            dright = (d['azimuth'] - right['azimuth']) % 360
+            dccw = (d['azimuth'] - ccw['azimuth']) % 360
+            dcw = (d['azimuth'] - cw['azimuth']) % 360
 
-            # FIXME: assing curb ramps yes/no before this, as SDOT's only
-            # geographical info is via metadata. Alternatively, assing curb
-            # ramps using only metadata in later steps.
-            if (dleft > 160) and (dleft < 200):
+            if (dccw > T_range[0]) and (dccw < T_range[1]):
                 # They're basically parallel - it's a T intersection ending on
                 # the left. Adjust the 'left' corner to be whatever point on
                 # the left sidewalk is closest to the 'right' corner.
                 matches = sw.loc[sw.pkey == d['pkey_left'], 'geometry']
                 if matches.shape[0]:
                     geom = matches.iloc[0]
-                    corner_left = geom.interpolate(geom.project(corner_right))
+                    corner_ccw = geom.interpolate(geom.project(corner_cw))
 
-            if (dright > 160) and (dright < 200):
+            if (dcw > T_range[0]) and (dcw < T_range[1]):
                 # They're basically parallel - it's a T intersection ending on
                 # the right. Adjust the 'right' corner to be whatever point on
                 # the right sidewalk is closest to the 'left' corner.
                 matches = sw.loc[sw.pkey == d['pkey_right'], 'geometry']
                 if matches.shape[0]:
                     geom = matches.iloc[0]
-                    corner_right = geom.interpolate(geom.project(corner_left))
+                    corner_cw = geom.interpolate(geom.project(corner_ccw))
 
             # The crossing is just connected corners. This is the step
             # where some constraints can be added.
-            crossing_geom = LineString([corner_left, corner_right])
+            crossing_geom = LineString([corner_ccw, corner_cw])
             rows.append({
                 'geometry': crossing_geom,
                 'st_id': d['id'],
+                'sw_left': d['pkey_left'],
+                'sw_right': d['pkey_right'],
+                'ccw_sw_right': ccw['pkey_right'],
+                'cw_sw_left': cw['pkey_left'],
             })
 
         crossings = gpd.GeoDataFrame(rows)
@@ -690,56 +688,70 @@ rule draw_crossings:
         dh.io.gdf_to_geojson(crossings, output[0])
 
 
-rule annotate_crossings:
+rule annotate_crossings_with_crosswalks:
     input:
         ['interim/redrawn/crossings.geojson',
-         'interim/redrawn/curbramps.geojson',
          'interim/clean/crosswalks.geojson']
+    output:
+        'interim/annotated/crossings_crosswalks.geojson'
+    run:
+        df = gpd.read_file(input[0])
+        cw = gpd.read_file(input[1])
+
+        # Reproject into UTM
+        x, y = df.iloc[0]['geometry'].coords[0]
+        utm_zone = dh.utm.lonlat_to_utm_epsg(x, y)
+        df.crs = cw.crs = {'init': 'epsg:4326'}
+        df = df.to_crs({'init': 'epsg:{}'.format(utm_zone)})
+        cw = cw.to_crs({'init': 'epsg:{}'.format(utm_zone)})
+
+        # Mark as having crosswalks if one is nearby
+        def marked_within_dist(row, dist=3.5, default=None):
+            g = row.geometry
+            q = [q.object for q in cw.sindex.nearest(g.bounds, 1, objects=True)]
+            in_bbox = cw.loc[q, 'geometry']
+            if in_bbox.empty:
+                return default
+            else:
+                return (in_bbox.distance(g) < dist).any()
+
+        df['marked'] = df.apply(marked_within_dist, axis=1)
+
+        # Reproject to WGS84
+        df = df.to_crs({'init': 'epsg:4326'})
+
+        dh.io.gdf_to_geojson(df, output[0])
+
+
+rule annotate_crossings_with_curbramps:
+    input:
+        ['interim/annotated/crossings_crosswalks.geojson',
+         'interim/redrawn/curbramps.geojson']
     output:
         'interim/annotated/crossings.geojson'
     run:
         df = gpd.read_file(input[0])
         cr = gpd.read_file(input[1])
-        cw = gpd.read_file(input[2])
+        df['curbramps_ccw'] = 0
+        df['curbramps_cw'] = 0
+        df['curbramps'] = 0
 
-        # Reproject into UTM
-        x, y = df.iloc[0]['geometry'].coords[0]
-        utm_zone = dh.utm.lonlat_to_utm_epsg(x, y)
-        df.crs = cr.crs = cw.crs = {'init': 'epsg:4326'}
-        df = df.to_crs({'init': 'epsg:{}'.format(utm_zone)})
-        cr = cr.to_crs({'init': 'epsg:{}'.format(utm_zone)})
-        cw = cw.to_crs({'init': 'epsg:{}'.format(utm_zone)})
+        starts = cr.loc[cr['position'] == 'start']
+        ends = cr.loc[cr['position'] == 'end']
 
-        # Mark as having crosswalks if one is nearby
-        def within_dist(row, dist=3.5, default=None):
-            query = cw.sindex.nearest(row.geometry.bounds, objects=True)
-            bbox_match = cw.loc[(q.object for q in query)]
-            if bbox_match.empty:
-                return default
-            else:
-                return (bbox_match.distance(row.geometry) < dist).any()
+        left = df['sw_left'].isin(starts['sw_pkey'])
+        ccw_right = df['ccw_sw_right'].isin(ends['sw_pkey'])
+        df.loc[(left | ccw_right), 'curbramps_ccw'] = 1
 
-        df['marked'] = df.apply(within_dist, axis=1)
+        right = df['sw_right'].isin(starts['sw_pkey'])
+        cw_left = df['cw_sw_left'].isin(starts['sw_pkey'])
+        df.loc[(right | cw_left), 'curbramps_cw'] = 1
 
-        # Mark as having curbramps if there is one near each endpoint.
-        # TODO: use networky information? Getting a few false negatives when
-        # crossing is a little offset.
-        def has_curbramps(row, dist=5):
-            coords = list(row.geometry.coords)
-            start = Point(*coords[0])
-            end = Point(*coords[-1])
+        both = (df['curbramps_ccw'] == 1) & (df['curbramps_cw'] == 1)
 
-            for point in (start, end):
-                query = cr.sindex.nearest(point.bounds, 1, objects=True)
-                nearest = cr.loc[(q.object for q in query)].iloc[0]
-                if nearest.geometry.distance(point) > dist:
-                    return False
-            return True
+        df.loc[both, 'curbramps'] = 1
 
-        df['curbramps'] = df.apply(has_curbramps, axis=1)
-
-        # Reproject to WGS84
-        df = df.to_crs({'init': 'epsg:4326'})
+        df = df.drop(columns=['curbramps_ccw', 'curbramps_cw'])
 
         dh.io.gdf_to_geojson(df, output[0])
 

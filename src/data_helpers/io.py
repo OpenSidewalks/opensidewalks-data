@@ -8,7 +8,7 @@ def gdf_to_geojson(gdf, path):
         properties.pop('geometry')
         return {
             'type': 'Feature',
-            'geometry': mapping(row.geometry),
+            'geometry': mapping(row['geometry']),
             'properties': properties
         }
 

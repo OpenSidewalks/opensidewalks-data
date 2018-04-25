@@ -85,6 +85,8 @@ def circular_ordered_graph(linestring_gdf, precision, columns=None,
     # For ease of traversal, the initial circular ordering is embedded in each
     # node as the 'next' node describing the edge (i.e. node u has a list of
     # nodes v1, v2, ..., vn in clockwise ordering).
+    # FIXME: Treat streets with very similar azimuths and no 'in-between'
+    # sidewalks as a single edge for crossings
     for u, d_node in G.nodes(data=True):
         # Note: complexity of for loop is due to potential of more than one
         # edge sharing the same u, v nodes.
