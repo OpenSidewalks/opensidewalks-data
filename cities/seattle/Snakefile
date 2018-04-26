@@ -112,6 +112,7 @@ rule fetch_crosswalks:
     run:
         # OBJECTID Required for esri API to function
         fields = ['OBJECTID']
+        fields += ['MIDBLOCK_CROSSWALK', 'SEGKEY']
 
         d = EsriDumper('https://gisrevprxy.seattle.gov/arcgis/rest/services/SDOT_EXT/ASSETS/mapserver/9',
                         fields=fields, extra_query_args={'geometryType': 'esriGeometryPoint'})
@@ -325,6 +326,12 @@ rule clean_crosswalks:
     run:
         df = gpd.read_file(input[0])
 
+        # Rename columns
+        df = df.rename(columns={
+            'MIDBLOCK_CROSSWALK': 'midblock',
+            'SEGKEY': 'st_pkey',
+        })
+
         # Remove invalid geometries
         df = df[df.geometry.notna()]
 
@@ -427,10 +434,8 @@ rule draw_sidewalks:
         # st = st.loc[idx]
 
         # Reproject into UTM
-        x, y = st.iloc[0]['geometry'].coords[0]
-        utm_zone = dh.utm.lonlat_to_utm_epsg(x, y)
-        st.crs = {'init': 'epsg:4326'}
-        st = st.to_crs({'init': 'epsg:{}'.format(utm_zone)})
+        st = dh.utm.gdf_wgs84_to_utm(st)
+        crs = st.crs
 
         # Draw sidewalks
         st['id'] = st.index
@@ -447,16 +452,14 @@ rule draw_sidewalks:
                 'geometry': geom
             })
         df_paths = gpd.GeoDataFrame(rows)
-        df_paths.crs = {'init': 'epsg:{}'.format(utm_zone)}
+        df_paths.crs = crs
         df_paths = df_paths.to_crs({'init': 'epsg:4326'})
 
         dh.io.gdf_to_geojson(df_paths, 'test_paths.geojson')
 
         # Reproject to WGS84
-        redrawn.crs = {'init': 'epsg:{}'.format(utm_zone)}
+        redrawn.crs = crs
         redrawn = redrawn.to_crs({'init': 'epsg:4326'})
-
-        # dh.io.gdf_to_geojson(redrawn, output[0])
 
         # Update redrawn with geometries (so that other metadata remains)
         # Note: 'forward' = 1 from sidewalkify means sidewalk was drawn on the
@@ -485,15 +488,6 @@ rule draw_sidewalks:
 
         sw = sw.loc[~sw.geometry.isnull()]
 
-        # left_st = left.streets_pkey[left.streets_pkey.isin(redrawn_l.street_id)]
-
-        # print(redrawn_l.set_index('street_id').loc[left_st].geometry)
-        # left.geometry = list(redrawn_l.set_index('street_id').loc[left_st].geometry)
-        # right.geometry = list(redrawn_r.set_index('street_id').loc[right.streets_pkey].geometry)
-
-        # sw.loc[left.index, 'geometry'] = left.geometry
-        # sw.loc[right.index, 'geometry'] = right.geometry
-
         # Keep layer data
         sw['layer'] = list(st.loc[sw.streets_pkey, 'layer'])
 
@@ -501,7 +495,7 @@ rule draw_sidewalks:
 
         dh.io.gdf_to_geojson(sw, output[0])
 
-        st.crs = {'init': 'epsg:{}'.format(utm_zone)}
+        st.crs = crs
         st = st.to_crs({'init': 'epsg:4326'})
         dh.io.gdf_to_geojson(st, output[1])
 
@@ -530,16 +524,19 @@ rule adjust_curbramps:
             else:
                 return 'none'
 
-            start = Point(sidewalk.geometry.coords[0])
-            end = Point(sidewalk.geometry.coords[-1])
-
-            dist_s = start.distance(cr_row.geometry)
-            dist_e = end.distance(cr_row.geometry)
-
-            if dist_s < dist_e:
-                return 'start'
+            if sidewalk['forward']:
+                # Sidewalk is in low address -> high address direction, keep
+                # values
+                if loc == 'H':
+                    return 'end'
+                else:
+                    return 'start'
             else:
-                return 'end'
+                # Sidewalk is in high address -> low address direction, swap
+                if loc == 'H':
+                    return 'start'
+                else:
+                    return 'end'
 
         # Adjust curb ramp positions
         def adjust(cr_row):
@@ -592,11 +589,8 @@ rule draw_crossings:
         #         st = st.drop(grp.iloc[1:].index)
 
         # Reproject into UTM
-        x, y = st.iloc[0]['geometry'].coords[0]
-        utm_zone = 'epsg:{}'.format(dh.utm.lonlat_to_utm_epsg(x, y))
-        sw.crs = st.crs = {'init': 'epsg:4326'}
-        sw = sw.to_crs({'init': utm_zone})
-        st = st.to_crs({'init': utm_zone})
+        sw = dh.utm.gdf_wgs84_to_utm(sw)
+        st = dh.utm.gdf_wgs84_to_utm(st)
 
         keep = ['id', 'pkey_left', 'pkey_right']
         swap = [['pkey_left', 'pkey_right']]
@@ -674,7 +668,7 @@ rule draw_crossings:
             crossing_geom = LineString([corner_ccw, corner_cw])
             rows.append({
                 'geometry': crossing_geom,
-                'st_id': d['id'],
+                'st_pkey': d['id'],
                 'sw_left': d['pkey_left'],
                 'sw_right': d['pkey_right'],
                 'ccw_sw_right': ccw['pkey_right'],
@@ -699,11 +693,8 @@ rule annotate_crossings_with_crosswalks:
         cw = gpd.read_file(input[1])
 
         # Reproject into UTM
-        x, y = df.iloc[0]['geometry'].coords[0]
-        utm_zone = dh.utm.lonlat_to_utm_epsg(x, y)
-        df.crs = cw.crs = {'init': 'epsg:4326'}
-        df = df.to_crs({'init': 'epsg:{}'.format(utm_zone)})
-        cw = cw.to_crs({'init': 'epsg:{}'.format(utm_zone)})
+        df = dh.utm.gdf_wgs84_to_utm(df)
+        cw = dh.utm.gdf_wgs84_to_utm(cw)
 
         # Mark as having crosswalks if one is nearby
         def marked_within_dist(row, dist=3.5, default=None):
@@ -728,7 +719,7 @@ rule annotate_crossings_with_curbramps:
         ['interim/annotated/crossings_crosswalks.geojson',
          'interim/redrawn/curbramps.geojson']
     output:
-        'interim/annotated/crossings.geojson'
+        'interim/annotated/crossings_curbramps.geojson'
     run:
         df = gpd.read_file(input[0])
         cr = gpd.read_file(input[1])
@@ -754,6 +745,109 @@ rule annotate_crossings_with_curbramps:
         df = df.drop(columns=['curbramps_ccw', 'curbramps_cw'])
 
         dh.io.gdf_to_geojson(df, output[0])
+
+
+rule add_midblock_crosswalks:
+    input:
+        ['interim/clean/crosswalks.geojson',
+         'interim/redrawn/curbramps.geojson',
+         'interim/redrawn/sidewalks.geojson',
+         'interim/redrawn/streets.geojson']
+    output:
+        'interim/annotated/crossings_mid.geojson'
+    run:
+        # TODO: Implement overrides for the 'midblock' key for some crossings.
+        # They're marked as 'N' for being mid-block, but obviously are. See:
+        # U-district
+
+        # If there's a mid-block marked crosswalk and two mid-block curb ramps
+        # associated with each sidewalk, draw a marked crossing w/ curb ramps
+        # on each side
+        cw = gpd.read_file(input[0])
+        cr = gpd.read_file(input[1])
+        sw = gpd.read_file(input[2])
+        st = gpd.read_file(input[3])
+
+        cw = dh.utm.gdf_wgs84_to_utm(cw)
+        cr = dh.utm.gdf_wgs84_to_utm(cr)
+        sw = dh.utm.gdf_wgs84_to_utm(sw)
+        st = dh.utm.gdf_wgs84_to_utm(st)
+
+        # Sanitize data for comparisons
+        st = st.loc[~st['pkey_left'].isnull()]
+        st = st.loc[~st['pkey_right'].isnull()]
+
+        # Find mid-block crosswalks and curb ramps
+        cw_mid = cw.loc[cw['midblock'] == 'Y']
+        cr_mid = cr.loc[cr['position'] == 'mid']
+
+        # Remove street keys not present in the streets dataset
+        cw_mid = cw_mid.loc[cw_mid['st_pkey'].isin(st['id'])]
+
+
+        rows = []
+        for idx, row in cw_mid.iterrows():
+            geom = row.geometry
+            st_row = st.loc[st['id'] == row['st_pkey']].iloc[0]
+
+            sw_left = sw.loc[sw['pkey'] == st_row['pkey_left']]
+            if not sw_left.shape[0]:
+                continue
+            sw_left = sw_left.iloc[0]
+
+            sw_right = sw.loc[sw['pkey'] == st_row['pkey_right']]
+            if not sw_right.shape[0]:
+                continue
+            sw_right = sw_right.iloc[0]
+
+            geom_left = sw_left['geometry']
+            geom_right = sw_right['geometry']
+
+            left = geom_left.interpolate(geom_left.project(geom))
+            right = geom_right.interpolate(geom_right.project(geom))
+            crossing_geom = LineString([left, right])
+
+            cr_left = (cr_mid['sw_pkey'] == sw_left['pkey']).sum()
+            cr_right = (cr_mid['sw_pkey'] == sw_left['pkey']).sum()
+            if cr_left and cr_right:
+                curbramps = True
+            else:
+                curbramps = False
+
+            new = {}
+            new['geometry'] = crossing_geom
+            new['marked'] = 1
+            new['curbramps'] = curbramps
+            new['st_pkey'] = st_row['id']
+            new['pkey'] = row['OBJECTID']
+
+            rows.append(new)
+
+        mid_crossings = gpd.GeoDataFrame(rows)
+
+        mid_crossings.crs = cr.crs
+        mid_crossings = mid_crossings.to_crs({'init': 'epsg:4326'})
+
+        dh.io.gdf_to_geojson(mid_crossings, output[0])
+
+
+rule join_crossings:
+    input:
+        ['interim/annotated/crossings_curbramps.geojson',
+         'interim/annotated/crossings_mid.geojson']
+    output:
+        'interim/annotated/crossings.geojson'
+    run:
+        main = gpd.read_file(input[0])
+        mid = gpd.read_file(input[1])
+
+        keep = ['geometry', 'curbramps', 'marked', 'st_pkey']
+        main = main[keep]
+        mid = mid[keep]
+
+        combined = pd.concat([main, mid])
+
+        dh.io.gdf_to_geojson(combined, output[0])
 
 
 rule fetch_dems:
@@ -863,11 +957,8 @@ rule add_inclines:
         sw = gpd.read_file(input[0])
         el = gpd.read_file(input[1])
 
-        x, y = sw.iloc[0]['geometry'].coords[0]
-        utm_zone = 'epsg:{}'.format(dh.utm.lonlat_to_utm_epsg(x, y))
-        sw.crs = el.crs = {'init': 'epsg:4326'}
-        sw = sw.to_crs({'init': utm_zone})
-        el = el.to_crs({'init': utm_zone})
+        sw = dh.utm.gdf_wgs84_to_utm(sw)
+        el = dh.utm.gdf_wgs84_to_utm(el)
 
         el['x'] = el.geometry.apply(lambda p: p.x)
         el['y'] = el.geometry.apply(lambda p: p.y)
@@ -941,7 +1032,7 @@ rule add_inclines:
         dh.io.gdf_to_geojson(sw, output[0])
 
         gdf2 = gpd.GeoDataFrame(geometry=[Polygon(convex_hull)])
-        gdf2.crs = {'init': utm_zone}
+        gdf2.crs = sw.crs
         gdf2 = gdf2.to_crs({'init': 'epsg:4326'})
         dh.io.gdf_to_geojson(gdf2, 'interim/inclined/hull.geojson')
 
@@ -1000,10 +1091,9 @@ rule network:
         sw.crs = {'init': 'epsg:4326'}
         cr.crs = {'init': 'epsg:4326'}
 
-        utm_zone = 'epsg:{}'.format(dh.utm.lonlat_to_utm_epsg(*sw.iloc[0].geometry.coords[0]))
-        sw = sw.to_crs({'init': utm_zone})
-        cr = cr.to_crs({'init': utm_zone})
-        el = el.to_crs({'init': utm_zone})
+        sw = dh.utm.gdf_wgs84_to_utm(sw)
+        cr = dh.utm.gdf_wgs84_to_utm(cr)
+        el = dh.utm.gdf_wgs84_to_utm(el)
 
         sw_network = dh.ped_network.network_sidewalks(sw, [cr, el])
 
