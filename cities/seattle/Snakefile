@@ -209,6 +209,7 @@ rule clean_streets:
 
         # Drop stairs, alleys, walkways, trails
         codemap = {
+            'highway': 3,
             'alley': 5,
             'stairs': 6,
             'walkways': 7,
@@ -449,6 +450,7 @@ rule draw_sidewalks:
             geom = LineString([node for node in path['nodes']])
             rows.append({
                 'n': n,
+                'cyclic': path['cyclic'],
                 'geometry': geom
             })
         df_paths = gpd.GeoDataFrame(rows)

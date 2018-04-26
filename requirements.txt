@@ -4,5 +4,5 @@ geopandas==0.3.0
 rasterio==1.0a12
 requests==2.18.4
 scipy==1.0.1
-sidewalkify==0.2.0
+sidewalkify==0.2.1
 snakemake==4.8.0
