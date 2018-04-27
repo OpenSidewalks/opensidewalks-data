@@ -836,18 +836,25 @@ rule add_midblock_crosswalks:
 rule join_crossings:
     input:
         ['interim/annotated/crossings_curbramps.geojson',
-         'interim/annotated/crossings_mid.geojson']
+         'interim/annotated/crossings_mid.geojson',
+         'interim/overridden/streets.geojson']
     output:
         'interim/annotated/crossings.geojson'
     run:
         main = gpd.read_file(input[0])
         mid = gpd.read_file(input[1])
+        st = gpd.read_file(input[2])
 
         keep = ['geometry', 'curbramps', 'marked', 'st_pkey']
         main = main[keep]
         mid = mid[keep]
 
         combined = pd.concat([main, mid])
+
+        # Look up the actual street name as well
+        st_unique = st.drop_duplicates('pkey').set_index('pkey')
+
+        combined['street_name'] = st_unique.loc[combined['st_pkey']]['name'].tolist()
 
         dh.io.gdf_to_geojson(combined, output[0])
 
