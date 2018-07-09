@@ -41,10 +41,10 @@ rule extract_sidewalks:
     output:
         'interim/extracted/sidewalks.geojson'
     run:
-        match_tags = [['highway', 'footway'], ['footway', 'sidewalk']]
+        match_and = [['highway', 'footway'], ['footway', 'sidewalk']]
         keep_tags = ['surface']
 
-        fc = extract_ways(input[0], match_tags, keep_tags)
+        fc = extract_ways(input[0], match_and=match_and, keep=keep_tags)
 
         with open(output[0], 'w') as f:
             json.dump(fc, f)
@@ -56,10 +56,10 @@ rule extract_crossings:
     output:
         'interim/extracted/crossings.geojson'
     run:
-        match_tags = [['highway', 'footway'], ['footway', 'crossing']]
+        match_and = [['highway', 'footway'], ['footway', 'crossing']]
         keep_tags = ['crossing']
 
-        fc = extract_ways(input[0], match_tags, keep_tags)
+        fc = extract_ways(input[0], match_and=match_and, keep=keep_tags)
 
         with open(output[0], 'w') as f:
             json.dump(fc, f)
@@ -71,9 +71,9 @@ rule extract_stairs:
     output:
         'interim/extracted/stairs.geojson'
     run:
-        match_tags = [['highway', 'steps']]
+        match_and = [['highway', 'steps']]
 
-        fc = extract_ways(input[0], match_tags)
+        fc = extract_ways(input[0], match_and=match_and)
 
         with open(output[0], 'w') as f:
             json.dump(fc, f)
@@ -85,19 +85,22 @@ rule extract_footways:
     output:
         'interim/extracted/footways.geojson'
     run:
-        fw_match_tags = [['highway', 'footway']]
-        fw_nonmatch_tags = [['footway', 'crossing'], ['footway', 'sidewalk']]
+        fw_match_and = [['highway', 'footway']]
+        fw_exclude_tags = [['footway', 'crossing'], ['footway', 'sidewalk']]
         fw_keep_tags = ['surface']
 
-        fyes_match_tags = [['foot', 'yes']]
-        fyes_nonmatch_tags = [['highway', 'footway'], ['highway', 'steps']]
+        fyes_match_and = [['foot', 'yes']]
+        fyes_exclude_tags = [['highway', 'footway'], ['highway', 'steps']]
         fyes_keep_tags = ['surface']
 
-        print(fw_nonmatch_tags)
-        print(fyes_nonmatch_tags)
-
-        fws = extract_ways(input[0], fw_match_tags, fw_keep_tags, nonmatches=fw_nonmatch_tags)
-        fyes = extract_ways(input[0], fyes_match_tags, fyes_keep_tags, nonmatches=fyes_nonmatch_tags)
+        fws = extract_ways(input[0],
+                           match_and=fw_match_and,
+                           keep=fw_keep_tags,
+                           excludes=fw_exclude_tags)
+        fyes = extract_ways(input[0],
+                            match_and=fyes_match_and,
+                            keep=fyes_keep_tags,
+                            excludes=fyes_exclude_tags)
 
         fws['features'] += fyes['features']
 
@@ -111,14 +114,14 @@ rule extract_streets:
     output:
         'interim/extracted/streets.geojson'
     run:
-        match_tags = {
+        match_or = {
             'highway': 'primary',
             'highway': 'secondary',
             'highway': 'tertiary',
             'highway': 'service',
         }
 
-        fc = extract_ways(input[0], match_tags)
+        fc = extract_ways(input[0], match_or=match_or)
 
         with open(output[0], 'w') as f:
             json.dump(fc, f)
@@ -131,10 +134,10 @@ rule extract_kerbs:
     output:
         'interim/extracted/kerbs.geojson'
     run:
-        match_tags = {'kerb': 'raised', 'kerb': 'lowered'}
+        match_or = [['kerb', 'raised'], ['kerb', 'lowered']]
         keep_tags = ['kerb', 'tactile_paving']
 
-        fc = extract_nodes(input[0], match_tags, keep_tags)
+        fc = extract_nodes(input[0], match_or=match_or, keep=keep_tags)
 
         with open(output[0], 'w') as f:
             json.dump(fc, f)
@@ -146,10 +149,10 @@ rule extract_elevators:
     output:
         'interim/extracted/elevators.geojson'
     run:
-        match_tags = {'elevator': 'yes'}
+        match_and = [['highway', 'elevator']]
         keep_tags = ['opening_hours']
 
-        fc = extract_nodes(input[0], match_tags, keep_tags)
+        fc = extract_nodes(input[0], match_and=match_and, keep=keep_tags)
 
         with open(output[0], 'w') as f:
             json.dump(fc, f)
@@ -424,12 +427,61 @@ rule collect:
         for in_path, out_path in zip(input, output):
             shell('cp {inpath} {outpath}'.format(inpath=in_path, outpath=out_path))
 
-def extract_nodes(path, matches, keep=None, nonmatches=None):
-    if keep is None:
-        keep = {}
 
-    if nonmatches is None:
-        nonmatches = {}
+def tag_match_and(tags, match_list):
+    if not match_list:
+        return True
+
+    for key, value in match_list:
+        if key not in tags or tags[key] != value:
+            return False
+
+    return True
+
+
+def tag_match_or(tags, match_list):
+    if not match_list:
+        return True
+
+    for key, value in match_list:
+        if key in tags and tags[key] == value:
+            return True
+
+    return False
+
+
+def tag_exclude(tags, match_list):
+    if not match_list:
+        return False
+
+    for key, value in match_list:
+        if key in tags and tags[key] == value:
+            return True
+
+    return False
+
+
+def tag_match(tags, match_and=None, match_or=None, excludes=None):
+    if match_and is None:
+        match_and = []
+    if match_or is None:
+        match_or = []
+    if excludes is None:
+        excludes = []
+
+    if not tag_match_and(tags, match_and):
+        return False
+    if not tag_match_or(tags, match_or):
+        return False
+    if tag_exclude(tags, excludes):
+        return False
+
+    return True
+
+
+def extract_nodes(path, match_and=None, match_or=None, excludes=None, keep=None):
+    if keep is None:
+        keep = []
 
     fc = {'type': 'FeatureCollection', 'features': []}
     for entity in parse_file(path):
@@ -439,18 +491,8 @@ def extract_nodes(path, matches, keep=None, nonmatches=None):
         tags = entity.tags
 
         # Filters
-        invalid = False
-        for key, value in matches.items():
-            if key not in tags or tags[key] != value:
-                invalid = True
-                break
-
-        for key, value in nonmatches.items():
-            if key in tags and tags[key] == value:
-                invalid = True
-                break
-
-        if invalid:
+        if not tag_match(tags, match_and=match_and, match_or=match_or,
+                         excludes=excludes):
             continue
 
         # Assemble a GeoJSON feature
@@ -469,12 +511,9 @@ def extract_nodes(path, matches, keep=None, nonmatches=None):
     return fc
 
 
-def extract_ways(path, matches, keep=None, nonmatches=None):
+def extract_ways(path, match_and=None, match_or=None, excludes=None, keep=None):
     if keep is None:
-        keep = {}
-
-    if nonmatches is None:
-        nonmatches = {}
+        keep = []
 
     nodes = {}
     fc = {'type': 'FeatureCollection', 'features': []}
@@ -488,18 +527,8 @@ def extract_ways(path, matches, keep=None, nonmatches=None):
         tags = entity.tags
 
         # Filters
-        invalid = False
-        for key, value in matches:
-            if key not in tags or tags[key] != value:
-                invalid = True
-                break
-
-        for key, value in nonmatches:
-            if key in tags and tags[key] == value:
-                invalid = True
-                break
-
-        if invalid:
+        if not tag_match(tags, match_and=match_and, match_or=match_or,
+                         excludes=excludes):
             continue
 
         # Assemble a GeoJSON feature
