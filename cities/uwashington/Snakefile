@@ -90,7 +90,7 @@ rule extract_footways:
         fw_keep_tags = ['surface']
 
         fyes_match_tags = {'foot': 'yes'}
-        fyes_nonmatch_tags = {'highway': 'footway'}
+        fyes_nonmatch_tags = {'highway': 'footway', 'highway': 'steps'}
         fyes_keep_tags = ['surface']
 
         fws = extract_ways(input[0], fw_match_tags, fw_keep_tags, nonmatches=fw_nonmatch_tags)
