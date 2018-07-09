@@ -1,0 +1,519 @@
+import copy
+from io import BytesIO
+import json
+import shutil
+import tempfile
+import zipfile
+
+import networkx as nx
+from osmread import parse_file, Node, Way
+import pyproj
+import rasterio as rio
+import requests
+import scipy
+from shapely.geometry import LinearRing, MultiPoint, Point
+from snakemake.remote.HTTP import RemoteProvider as HTTPRemoteProvider
+
+sys.path.append('../../src')
+import data_helpers as dh
+
+HTTP = HTTPRemoteProvider()
+
+
+rule all:
+    input:
+        expand('output/{layer}.geojson', layer=['sidewalks', 'crossings', 'footways',
+                                                'kerbs', 'elevators'])
+
+rule fetch_osm:
+    input:
+        HTTP.remote('https://www.openstreetmap.org/api/0.6/map?bbox=-122.3183%2C47.6435%2C-122.2928%2C47.664',
+                    keep_local=True)
+    output:
+        'interim/raw/extract.osm'
+    run:
+        shell('mv {input} {output}')
+
+
+rule extract_sidewalks:
+    input:
+        'interim/raw/extract.osm'
+    output:
+        'interim/extracted/sidewalks.geojson'
+    run:
+        match_tags = {'highway': 'footway', 'footway': 'sidewalk'}
+        keep_tags = ['surface']
+
+        fc = extract_ways(input[0], match_tags, keep_tags)
+
+        with open(output[0], 'w') as f:
+            json.dump(fc, f)
+
+
+rule extract_crossings:
+    input:
+        'interim/raw/extract.osm'
+    output:
+        'interim/extracted/crossings.geojson'
+    run:
+        match_tags = {'highway': 'footway', 'footway': 'crossing'}
+        keep_tags = ['crossing']
+
+        fc = extract_ways(input[0], match_tags, keep_tags)
+
+        with open(output[0], 'w') as f:
+            json.dump(fc, f)
+
+
+rule extract_stairs:
+    input:
+        'interim/raw/extract.osm'
+    output:
+        'interim/extracted/stairs.geojson'
+    run:
+        match_tags = {'highway': 'steps'}
+
+        fc = extract_ways(input[0], match_tags)
+
+        with open(output[0], 'w') as f:
+            json.dump(fc, f)
+
+
+rule extract_footways:
+    input:
+        'interim/raw/extract.osm'
+    output:
+        'interim/extracted/footways.geojson'
+    run:
+        fw_match_tags = {'highway': 'footway'}
+        fw_nonmatch_tags = {'footway': 'crossing', 'footway': 'sidewalk'}
+        fw_keep_tags = ['surface']
+
+        fyes_match_tags = {'foot': 'yes'}
+        fyes_nonmatch_tags = {'highway': 'footway'}
+        fyes_keep_tags = ['surface']
+
+        fws = extract_ways(input[0], fw_match_tags, fw_keep_tags, nonmatches=fw_nonmatch_tags)
+        fyes = extract_ways(input[0], fyes_match_tags, fyes_keep_tags, nonmatches=fyes_nonmatch_tags)
+
+        fws['features'] += fyes['features']
+
+        with open(output[0], 'w') as f:
+            json.dump(fws, f)
+
+
+rule extract_streets:
+    input:
+        'interim/raw/extract.osm'
+    output:
+        'interim/extracted/streets.geojson'
+    run:
+        match_tags = {
+            'highway': 'primary',
+            'highway': 'secondary',
+            'highway': 'tertiary',
+            'highway': 'service',
+        }
+
+        fc = extract_ways(input[0], match_tags)
+
+        with open(output[0], 'w') as f:
+            json.dump(fc, f)
+
+
+
+rule extract_kerbs:
+    input:
+        'interim/raw/extract.osm'
+    output:
+        'interim/extracted/kerbs.geojson'
+    run:
+        match_tags = {'kerb': 'raised', 'kerb': 'lowered'}
+        keep_tags = ['kerb', 'tactile_paving']
+
+        fc = extract_nodes(input[0], match_tags, keep_tags)
+
+        with open(output[0], 'w') as f:
+            json.dump(fc, f)
+
+
+rule extract_elevators:
+    input:
+        'interim/raw/extract.osm'
+    output:
+        'interim/extracted/elevators.geojson'
+    run:
+        match_tags = {'elevator': 'yes'}
+        keep_tags = ['opening_hours']
+
+        fc = extract_nodes(input[0], match_tags, keep_tags)
+
+        with open(output[0], 'w') as f:
+            json.dump(fc, f)
+
+
+rule fetch_dem:
+    output:
+        'interim/dem/dem.tif'
+    run:
+        url = ('https://prd-tnm.s3.amazonaws.com/StagedProducts/Elevation/13/ArcGrid/USGS_NED_13_n48w123_ArcGrid.zip')
+        # TODO: add progress bar using stream argument + click progress bar
+        response = requests.get(url)
+        response.raise_for_status()
+        zipper = zipfile.ZipFile(BytesIO(response.content))
+        extract_dir = 'grdn48w123_13/'
+
+        # Extract everything
+        tempdir = tempfile.mkdtemp()
+        for path in zipper.namelist():
+            if extract_dir in path:
+                if extract_dir == path:
+                    continue
+                extract_path = os.path.join(tempdir, os.path.basename(path))
+                with zipper.open(path) as f:
+                    with open(extract_path, 'wb') as g:
+                        g.write(f.read())
+
+        dem_path = os.path.join(tempdir, 'w001001.adf')
+
+        with rio.open(dem_path) as src:
+            profile = src.profile
+
+            profile.update({'blockysize': 16, 'driver': 'GTiff', 'compress': 'lzw'})
+
+            with rio.open('interim/dem/dem.tif', 'w', **profile) as dst:
+                data = src.read()
+                dst.write(data)
+
+        shutil.rmtree(tempdir)
+
+
+rule intersection_elevations:
+    input:
+        ['interim/raw/extract.osm', 'interim/dem/dem.tif']
+    output:
+        ['interim/dem/elevations.geojson']
+    run:
+        dem = rio.open(input[1])
+
+        # Find important graph nodes: street endpoints that shared by > 2 ways *or*
+        # unshared (dead ends)
+
+        keep = ['primary', 'secondary', 'tertiary', 'service', 'residential']
+
+        nodes = {}
+        node_count = {}
+        for entity in parse_file(input[0]):
+            if isinstance(entity, Node):
+                nodes[entity.id] = entity
+
+            if not isinstance(entity, Way):
+                continue
+
+            if 'highway' not in entity.tags:
+                continue
+            if entity.tags['highway'] not in keep:
+                continue
+
+            for node in entity.nodes:
+                if node in node_count:
+                    node_count[node] += 1
+                else:
+                    node_count[node] = 0
+
+        wgs84 = pyproj.Proj(init='epsg:4326')
+        demproj = pyproj.Proj(**dem.crs)
+
+        # Extract points of interest and project to same CRS as DEM
+        points = []
+        for node_id, node in nodes.items():
+            if node_id in node_count:
+                if node_count[node_id] > 2 or node_count[node_id] == 1:
+                    coords = pyproj.transform(wgs84, demproj, node.lon, node.lat)
+                    elevation = dh.raster_interp.interpolated_value(*coords, dem)
+                    points.append({
+                        'type': 'Feature',
+                        'geometry': {'type': 'Point', 'coordinates': [node.lon, node.lat]},
+                        'properties': {'elevation': round(elevation, 1)},
+                    })
+
+        fc = {'type': 'FeatureCollection', 'features': points}
+        with open(output[0], 'w') as f:
+            json.dump(fc, f)
+
+
+rule add_lengths:
+    input:
+        expand('interim/extracted/{layer}.geojson', layer=['sidewalks', 'crossings', 'footways'])
+    output:
+        expand('interim/lengthed/{layer}.geojson', layer=['sidewalks', 'crossings', 'footways'])
+    run:
+        for in_path, out_path in zip(input, output):
+            with open(in_path) as f:
+                layer = json.load(f)
+            for feature in layer['features']:
+                length = dh.haversine(feature['geometry']['coordinates'])
+                feature['properties']['length'] = round(length, 1)
+            with open(out_path, 'w') as f:
+                json.dump(layer, f)
+
+
+rule add_inclines:
+    input:
+        ['interim/dem/elevations.geojson',
+         'interim/lengthed/sidewalks.geojson',
+         'interim/lengthed/footways.geojson']
+    output:
+        ['interim/inclined/sidewalks.geojson',
+         'interim/inclined/footways.geojson']
+    run:
+        with open(input[0]) as f:
+            el = json.load(f)
+        # Project to UTM
+        wgs84 = pyproj.Proj(init='epsg:4326')
+        utm = pyproj.Proj(init='epsg:26910')
+
+        # Create interpolator
+        xs = []
+        ys = []
+        zs = []
+
+        for point in el['features']:
+            coords = point['geometry']['coordinates']
+            x, y = pyproj.transform(wgs84, utm, coords[0], coords[1])
+            xs.append(x)
+            ys.append(y)
+            zs.append(point['properties']['elevation'])
+            point['geometry']['coordinates'] = [x, y]
+
+        # Start interpolating elevations, calculate incline
+        xys = list(zip(xs, ys))
+        convex_hull = LinearRing(MultiPoint(xys).convex_hull.exterior.coords)
+
+        interpolate = scipy.interpolate.LinearNDInterpolator(xys, zs, fill_value=-1000)
+
+        # Extract inclines
+        for in_path, out_path in zip(input[1:], output):
+            with open(in_path) as f:
+                sw = json.load(f)
+
+            for way in sw['features']:
+                start_lonlat = way['geometry']['coordinates'][0]
+                end_lonlat = way['geometry']['coordinates'][-1]
+
+                eles = []
+                for point in [start_lonlat, end_lonlat]:
+                    in_utm = pyproj.transform(wgs84, utm, point[0], point[1])
+                    ele = interpolate(*in_utm)
+
+                    if ele == -1000:
+                        # Failed to interpolate - use convex hull as representative
+                        # elevation
+                        pt = Point(in_utm)
+                        nearest = convex_hull.interpolate(convex_hull.project(pt))
+
+                        # Give it a 1-meter nudge 'inwards' so we're guaranteed to get an
+                        # interpolate result
+                        dx = nearest.x - pt.x
+                        dy = nearest.y - pt.y
+                        dist = (dx**2 + dy**2)**.5
+                        dx = 1 * dx / dist
+                        dy = 1 * dy / dist
+                        x = nearest.x + dx
+                        y = nearest.y + dy
+                        ele = interpolate(x, y)
+
+                    eles.append(ele)
+
+                incline = (eles[1] - eles[0]) / way['properties']['length']
+                incline = int(1000 * incline)
+                if incline > 999:
+                    incline = 999
+
+                way['properties']['incline'] = incline
+
+            with open(out_path, 'w') as f:
+                json.dump(sw, f)
+
+
+rule node:
+    input:
+        ['interim/inclined/sidewalks.geojson',
+         'interim/lengthed/crossings.geojson',
+         'interim/inclined/footways.geojson',
+         'interim/extracted/stairs.geojson']
+    output:
+        expand('interim/noded/{layer}.geojson',
+               layer=['sidewalks', 'crossings', 'footways', 'stairs'])
+    run:
+        geojsons = []
+        for in_path in input:
+            with open(in_path) as f:
+                geojsons.append(json.load(f))
+
+        # Given a set of geojsons, split when they fairly-perfectly share nodes. Fairly
+        # = sub-cm precision. This would be better to do in 'OSM' space first using node
+        # IDs, this is a hack to get a release out.
+
+        def get_node_id(coordinate):
+            return ','.join([str(round(c, 9)) for c in coordinate])
+
+        # Store nodes as rounded lon-lat strings. Keep the 'degree', i.e. number of times
+        # it is referenced
+        degrees = {}
+
+        for geojson in geojsons:
+            for feature in geojson['features']:
+                for coordinate in feature['geometry']['coordinates']:
+                    node_id = get_node_id(coordinate)
+                    if node_id in degrees:
+                        degrees[node_id] += 1
+                    else:
+                        degrees[node_id] = 1
+
+        # Now that we have all of the degrees, we can split up each geometry into new
+        # features. Note that no attributes are updated.
+        new_geojsons = []
+        for geojson in geojsons:
+            new_geojson = {'type': 'FeatureCollection', 'features': []}
+            for feature in geojson['features']:
+                split_at_indices = []
+                coordinates = feature['geometry']['coordinates']
+                for i, coordinate in enumerate(coordinates):
+                    node_id = get_node_id(coordinate)
+                    degree = degrees[node_id]
+                    if i != 0 and i != (len(coordinates) - 1):
+                        if degree > 1:
+                            split_at_indices.append(i)
+                if split_at_indices:
+                    last = 0
+                    split_at_indices.append(len(coordinates) - 1)
+                    for index in split_at_indices:
+                        new_coords = coordinates[last:index + 1]
+                        new_feature = copy.deepcopy(feature)
+                        new_feature['geometry']['coordinates'] = new_coords
+                        new_geojson['features'].append(new_feature)
+                        last = index
+                else:
+                    new_geojson['features'].append(feature)
+            new_geojsons.append(new_geojson)
+
+        for out_path, new_geojson in zip(output, new_geojsons):
+            with open(out_path, 'w') as f:
+                json.dump(new_geojson, f)
+
+
+
+
+
+rule collect:
+    input:
+        ['interim/noded/sidewalks.geojson',
+         'interim/noded/crossings.geojson',
+         'interim/noded/footways.geojson',
+         'interim/noded/stairs.geojson',
+         'interim/extracted/kerbs.geojson',
+         'interim/extracted/elevators.geojson']
+    output:
+        expand('output/{layer}.geojson',
+               layer=['sidewalks', 'crossings', 'footways', 'stairs', 'kerbs', 'elevators'])
+    run:
+        for in_path, out_path in zip(input, output):
+            shell('cp {inpath} {outpath}'.format(inpath=in_path, outpath=out_path))
+
+def extract_nodes(path, matches, keep=None, nonmatches=None):
+    if keep is None:
+        keep = {}
+
+    if nonmatches is None:
+        nonmatches = {}
+
+    fc = {'type': 'FeatureCollection', 'features': []}
+    for entity in parse_file(path):
+        if not isinstance(entity, Node):
+            continue
+
+        tags = entity.tags
+
+        # Filters
+        invalid = False
+        for key, value in matches.items():
+            if key not in tags or tags[key] != value:
+                invalid = True
+                break
+
+        for key, value in nonmatches.items():
+            if key in tags and tags[key] == value:
+                invalid = True
+                break
+
+        if invalid:
+            continue
+
+        # Assemble a GeoJSON feature
+        feature = {
+            'type': 'Feature',
+            'geometry': {'type': 'Point', 'coordinates': [entity.lon, entity.lat]},
+            'properties': {},
+        }
+
+        for key in keep:
+            if key in tags:
+                feature['properties'][key] = tags[key]
+
+        fc['features'].append(feature)
+
+    return fc
+
+
+def extract_ways(path, matches, keep=None, nonmatches=None):
+    if keep is None:
+        keep = {}
+
+    if nonmatches is None:
+        nonmatches = {}
+
+    nodes = {}
+    fc = {'type': 'FeatureCollection', 'features': []}
+    for entity in parse_file(path):
+        if isinstance(entity, Node):
+            nodes[entity.id] = entity
+
+        if not isinstance(entity, Way):
+            continue
+
+        tags = entity.tags
+
+        # Filters
+        invalid = False
+        for key, value in matches.items():
+            if key not in tags or tags[key] != value:
+                invalid = True
+                break
+
+        for key, value in nonmatches.items():
+            if key in tags and tags[key] == value:
+                invalid = True
+                break
+
+        if invalid:
+            continue
+
+        # Assemble a GeoJSON feature
+        feature = {
+            'type': 'Feature',
+            'geometry': {'type': 'LineString', 'coordinates': []},
+            'properties': {},
+        }
+
+        coords = [[nodes[n].lon, nodes[n].lat] for n in entity.nodes]
+
+        feature['geometry']['coordinates'] = coords
+
+        for key in keep:
+            if key in tags:
+                feature['properties'][key] = tags[key]
+
+        fc['features'].append(feature)
+
+    return fc
