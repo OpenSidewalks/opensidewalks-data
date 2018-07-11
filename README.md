@@ -2,7 +2,10 @@
 
 # Installation
 
-0. (Optiona) Install a virtualenv
+Note: if the city uses OSM data (e.g. uwashington), you must install the command line
+utility 'osmosis'
+
+0. (Optional) Install a virtualenv
 
     python3 -m venv venv
     source venv/bin/activate

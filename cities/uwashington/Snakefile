@@ -23,6 +23,7 @@ HTTP = HTTPRemoteProvider()
 rule all:
     input:
         expand('output/{layer}.geojson', layer=['sidewalks', 'crossings', 'footways',
+                                                'pedestrian_roads', 'footyes', 'stairs',
                                                 'kerbs', 'elevators'])
 
 rule fetch_osm:
@@ -35,127 +36,96 @@ rule fetch_osm:
         shell('mv {input} {output}')
 
 
-rule extract_sidewalks:
+rule osmosis:
     input:
         'interim/raw/extract.osm'
     output:
+        expand('interim/osmosis/{layer}.osm', layer=['sidewalks', 'crossings',
+                                                     'footways', 'pedestrian_roads',
+                                                     'footyes', 'stairs', 'streets',
+                                                     'kerbs', 'elevators'])
+    shell: './extract.sh {input} interim/osmosis/'
+
+
+rule extract_sidewalks:
+    input:
+        'interim/osmosis/sidewalks.osm'
+    output:
         'interim/extracted/sidewalks.geojson'
     run:
-        match_and = [['highway', 'footway'], ['footway', 'sidewalk']]
-        keep_tags = ['surface']
-
-        fc = extract_ways(input[0], match_and=match_and, keep=keep_tags)
-
-        with open(output[0], 'w') as f:
-            json.dump(fc, f)
+        ways_to_geojson(input[0], output[0], keep=['surface'])
 
 
 rule extract_crossings:
     input:
-        'interim/raw/extract.osm'
+        'interim/osmosis/crossings.osm'
     output:
         'interim/extracted/crossings.geojson'
     run:
-        match_and = [['highway', 'footway'], ['footway', 'crossing']]
-        keep_tags = ['crossing']
-
-        fc = extract_ways(input[0], match_and=match_and, keep=keep_tags)
-
-        with open(output[0], 'w') as f:
-            json.dump(fc, f)
-
-
-rule extract_stairs:
-    input:
-        'interim/raw/extract.osm'
-    output:
-        'interim/extracted/stairs.geojson'
-    run:
-        match_and = [['highway', 'steps']]
-
-        fc = extract_ways(input[0], match_and=match_and)
-
-        with open(output[0], 'w') as f:
-            json.dump(fc, f)
+        ways_to_geojson(input[0], output[0], keep=['crossing'])
 
 
 rule extract_footways:
     input:
-        'interim/raw/extract.osm'
+        'interim/osmosis/footways.osm'
     output:
         'interim/extracted/footways.geojson'
     run:
-        fw_match_and = [['highway', 'footway']]
-        fw_exclude_tags = [['footway', 'crossing'], ['footway', 'sidewalk']]
-        fw_keep_tags = ['surface']
+        ways_to_geojson(input[0], output[0], keep=['surface'])
 
-        fyes_match_and = [['foot', 'yes']]
-        fyes_exclude_tags = [['highway', 'footway'], ['highway', 'steps']]
-        fyes_keep_tags = ['surface']
 
-        fws = extract_ways(input[0],
-                           match_and=fw_match_and,
-                           keep=fw_keep_tags,
-                           excludes=fw_exclude_tags)
-        fyes = extract_ways(input[0],
-                            match_and=fyes_match_and,
-                            keep=fyes_keep_tags,
-                            excludes=fyes_exclude_tags)
+rule extract_pedestrian_roads:
+    input:
+        'interim/osmosis/pedestrian_roads.osm'
+    output:
+        'interim/extracted/pedestrian_roads.geojson'
+    run:
+        ways_to_geojson(input[0], output[0], keep=['surface'])
 
-        fws['features'] += fyes['features']
 
-        with open(output[0], 'w') as f:
-            json.dump(fws, f)
+rule extract_footyes:
+    input:
+        'interim/osmosis/footyes.osm'
+    output:
+        'interim/extracted/footyes.geojson'
+    run:
+        ways_to_geojson(input[0], output[0], keep=['surface'])
+
+
+rule extract_stairs:
+    input:
+        'interim/osmosis/stairs.osm'
+    output:
+        'interim/extracted/stairs.geojson'
+    run:
+        ways_to_geojson(input[0], output[0])
 
 
 rule extract_streets:
     input:
-        'interim/raw/extract.osm'
+        'interim/osmosis/streets.osm'
     output:
         'interim/extracted/streets.geojson'
     run:
-        match_or = {
-            'highway': 'primary',
-            'highway': 'secondary',
-            'highway': 'tertiary',
-            'highway': 'service',
-        }
-
-        fc = extract_ways(input[0], match_or=match_or)
-
-        with open(output[0], 'w') as f:
-            json.dump(fc, f)
-
+        ways_to_geojson(input[0], output[0])
 
 
 rule extract_kerbs:
     input:
-        'interim/raw/extract.osm'
+        'interim/osmosis/kerbs.osm'
     output:
         'interim/extracted/kerbs.geojson'
     run:
-        match_or = [['kerb', 'raised'], ['kerb', 'lowered']]
-        keep_tags = ['kerb', 'tactile_paving']
-
-        fc = extract_nodes(input[0], match_or=match_or, keep=keep_tags)
-
-        with open(output[0], 'w') as f:
-            json.dump(fc, f)
+        nodes_to_geojson(input[0], output[0], keep=['kerb', 'tactile_paving'])
 
 
 rule extract_elevators:
     input:
-        'interim/raw/extract.osm'
+        'interim/osmosis/elevators.osm'
     output:
         'interim/extracted/elevators.geojson'
     run:
-        match_and = [['highway', 'elevator']]
-        keep_tags = ['opening_hours']
-
-        fc = extract_nodes(input[0], match_and=match_and, keep=keep_tags)
-
-        with open(output[0], 'w') as f:
-            json.dump(fc, f)
+        nodes_to_geojson(input[0], output[0], keep=['opening_hours'])
 
 
 rule fetch_dem:
@@ -196,7 +166,7 @@ rule fetch_dem:
 
 rule intersection_elevations:
     input:
-        ['interim/raw/extract.osm', 'interim/dem/dem.tif']
+        ['interim/osmosis/streets.osm', 'interim/dem/dem.tif']
     output:
         ['interim/dem/elevations.geojson']
     run:
@@ -205,8 +175,6 @@ rule intersection_elevations:
         # Find important graph nodes: street endpoints that shared by > 2 ways *or*
         # unshared (dead ends)
 
-        keep = ['primary', 'secondary', 'tertiary', 'service', 'residential']
-
         nodes = {}
         node_count = {}
         for entity in parse_file(input[0]):
@@ -214,11 +182,6 @@ rule intersection_elevations:
                 nodes[entity.id] = entity
 
             if not isinstance(entity, Way):
-                continue
-
-            if 'highway' not in entity.tags:
-                continue
-            if entity.tags['highway'] not in keep:
                 continue
 
             for node in entity.nodes:
@@ -250,9 +213,15 @@ rule intersection_elevations:
 
 rule add_lengths:
     input:
-        expand('interim/extracted/{layer}.geojson', layer=['sidewalks', 'crossings', 'footways'])
+        expand('interim/extracted/{layer}.geojson', layer=['sidewalks', 'crossings',
+                                                           'footways',
+                                                           'pedestrian_roads',
+                                                           'footyes', 'stairs'])
     output:
-        expand('interim/lengthed/{layer}.geojson', layer=['sidewalks', 'crossings', 'footways'])
+        expand('interim/lengthed/{layer}.geojson', layer=['sidewalks', 'crossings',
+                                                          'footways',
+                                                          'pedestrian_roads',
+                                                          'footyes', 'stairs'])
     run:
         for in_path, out_path in zip(input, output):
             with open(in_path) as f:
@@ -268,10 +237,14 @@ rule add_inclines:
     input:
         ['interim/dem/elevations.geojson',
          'interim/lengthed/sidewalks.geojson',
-         'interim/lengthed/footways.geojson']
+         'interim/lengthed/footways.geojson',
+         'interim/lengthed/pedestrian_roads.geojson',
+         'interim/lengthed/footyes.geojson']
     output:
         ['interim/inclined/sidewalks.geojson',
-         'interim/inclined/footways.geojson']
+         'interim/inclined/footways.geojson',
+         'interim/inclined/pedestrian_roads.geojson',
+         'interim/inclined/footyes.geojson']
     run:
         with open(input[0]) as f:
             el = json.load(f)
@@ -347,10 +320,12 @@ rule node:
         ['interim/inclined/sidewalks.geojson',
          'interim/lengthed/crossings.geojson',
          'interim/inclined/footways.geojson',
-         'interim/extracted/stairs.geojson']
+         'interim/inclined/pedestrian_roads.geojson',
+         'interim/inclined/footyes.geojson',
+         'interim/lengthed/stairs.geojson']
     output:
         expand('interim/noded/{layer}.geojson',
-               layer=['sidewalks', 'crossings', 'footways', 'stairs'])
+               layer=['sidewalks', 'crossings', 'footways', 'pedestrian_roads', 'footyes', 'stairs'])
     run:
         geojsons = []
         for in_path in input:
@@ -409,91 +384,36 @@ rule node:
                 json.dump(new_geojson, f)
 
 
-
-
-
 rule collect:
     input:
         ['interim/noded/sidewalks.geojson',
          'interim/noded/crossings.geojson',
          'interim/noded/footways.geojson',
+         'interim/noded/pedestrian_roads.geojson',
+         'interim/noded/footyes.geojson',
          'interim/noded/stairs.geojson',
          'interim/extracted/kerbs.geojson',
          'interim/extracted/elevators.geojson']
     output:
         expand('output/{layer}.geojson',
-               layer=['sidewalks', 'crossings', 'footways', 'stairs', 'kerbs', 'elevators'])
+               layer=['sidewalks', 'crossings', 'footways', 'pedestrian_roads',
+                      'footyes', 'stairs', 'kerbs', 'elevators'])
     run:
         for in_path, out_path in zip(input, output):
             shell('cp {inpath} {outpath}'.format(inpath=in_path, outpath=out_path))
 
 
-def tag_match_and(tags, match_list):
-    if not match_list:
-        return True
 
-    for key, value in match_list:
-        if key not in tags or tags[key] != value:
-            return False
-
-    return True
-
-
-def tag_match_or(tags, match_list):
-    if not match_list:
-        return True
-
-    for key, value in match_list:
-        if key in tags and tags[key] == value:
-            return True
-
-    return False
-
-
-def tag_exclude(tags, match_list):
-    if not match_list:
-        return False
-
-    for key, value in match_list:
-        if key in tags and tags[key] == value:
-            return True
-
-    return False
-
-
-def tag_match(tags, match_and=None, match_or=None, excludes=None):
-    if match_and is None:
-        match_and = []
-    if match_or is None:
-        match_or = []
-    if excludes is None:
-        excludes = []
-
-    if not tag_match_and(tags, match_and):
-        return False
-    if not tag_match_or(tags, match_or):
-        return False
-    if tag_exclude(tags, excludes):
-        return False
-
-    return True
-
-
-def extract_nodes(path, match_and=None, match_or=None, excludes=None, keep=None):
+def nodes_to_geojson(path_in, path_out, keep=None):
     if keep is None:
         keep = []
 
     fc = {'type': 'FeatureCollection', 'features': []}
-    for entity in parse_file(path):
+    for entity in parse_file(path_in):
         if not isinstance(entity, Node):
             continue
 
         tags = entity.tags
-
-        # Filters
-        if not tag_match(tags, match_and=match_and, match_or=match_or,
-                         excludes=excludes):
-            continue
 
         # Assemble a GeoJSON feature
         feature = {
@@ -508,16 +428,17 @@ def extract_nodes(path, match_and=None, match_or=None, excludes=None, keep=None)
 
         fc['features'].append(feature)
 
-    return fc
+    with open(path_out, 'w') as f:
+        json.dump(fc, f)
 
 
-def extract_ways(path, match_and=None, match_or=None, excludes=None, keep=None):
+def ways_to_geojson(path_in, path_out, keep=None):
     if keep is None:
         keep = []
 
     nodes = {}
     fc = {'type': 'FeatureCollection', 'features': []}
-    for entity in parse_file(path):
+    for entity in parse_file(path_in):
         if isinstance(entity, Node):
             nodes[entity.id] = entity
 
@@ -526,20 +447,13 @@ def extract_ways(path, match_and=None, match_or=None, excludes=None, keep=None):
 
         tags = entity.tags
 
-        # Filters
-        if not tag_match(tags, match_and=match_and, match_or=match_or,
-                         excludes=excludes):
-            continue
-
         # Assemble a GeoJSON feature
         feature = {
             'type': 'Feature',
             'geometry': {'type': 'LineString', 'coordinates': []},
             'properties': {},
         }
-
         coords = [[nodes[n].lon, nodes[n].lat] for n in entity.nodes]
-
         feature['geometry']['coordinates'] = coords
 
         for key in keep:
@@ -548,4 +462,5 @@ def extract_ways(path, match_and=None, match_or=None, excludes=None, keep=None):
 
         fc['features'].append(feature)
 
-    return fc
+    with open(path_out, 'w') as f:
+        json.dump(fc, f)
