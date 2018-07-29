@@ -277,6 +277,10 @@ rule add_inclines:
                 sw = json.load(f)
 
             for way in sw['features']:
+                if way['properties']['length'] < 3:
+                    way['properties']['incline'] = 0
+                    continue
+
                 start_lonlat = way['geometry']['coordinates'][0]
                 end_lonlat = way['geometry']['coordinates'][-1]
 
