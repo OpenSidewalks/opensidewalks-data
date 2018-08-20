@@ -373,11 +373,13 @@ rule override_sidewalks:
         df = df.loc[~df['pkey'].isin(to_remove)]
 
         to_add = override['add']
+        entries = []
         for i, entry in enumerate(to_add):
             id = -(i + 1)
             entry['pkey'] = id
             entry['geometry'] = shape(entry['geometry'])
-            df.loc[id] = entry
+            entries.append(entry)
+        df = pd.concat([df, gpd.GeoDataFrame(entries)])
 
         dh.io.gdf_to_geojson(df, output[0])
 
@@ -867,7 +869,7 @@ rule fetch_dems:
     run:
         df = gpd.read_file(input[0])
 
-        url = ('https://prd-tnm.s3.amazonaws.com/StagedProducts/Elevation/13/ArcGrid/n48w123.zip')
+        url = ('https://prd-tnm.s3.amazonaws.com/StagedProducts/Elevation/13/ArcGrid/USGS_NED_13_n48w123_ArcGrid.zip')
         # TODO: add progress bar using stream argument + click progress bar
         response = requests.get(url)
         response.raise_for_status()
