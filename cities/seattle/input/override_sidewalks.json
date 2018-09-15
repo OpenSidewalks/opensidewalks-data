@@ -28,5 +28,26 @@
     "streets_pkey": 337051,
     "surface": "concrete",
     "width": 1.8288
+  }, {
+    "geometry": {
+      "type": "LineString",
+      "coordinates": []
+    },
+    "offset": 11,
+    "side": "SW",
+    "streets_pkey": 666476,
+    "surface": "concrete",
+    "width": 1.8
+  }, {
+    "geometry": {
+      "type": "LineString",
+      "coordinates": []
+    },
+    "offset": 11,
+    "side": "SW",
+    "streets_pkey": 12349,
+    "surface": "concrete",
+    "width": 1.8
+
   }]
 }

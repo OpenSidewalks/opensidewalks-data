@@ -70,7 +70,7 @@ rule fetch_snd:
         'interim/raw/snd.geojson'
     run:
         url = 'https://data.seattle.gov/api/views/afip-2mzr/files/08b54e93-1443-4525-9f9a-adf5b03b67d6?filename=Street_Network_Database.zip'
-        df = dh.fetchers.fetch_shapefile(url, 'StatePlane/Street_Network_Database')
+        df = dh.fetchers.fetch_shapefile(url, 'StatePlane/Street_Network_Database.shp')
         dh.io.gdf_to_geojson(df, output[0])
 
 

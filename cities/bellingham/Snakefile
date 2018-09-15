@@ -1,0 +1,541 @@
+import fiona
+import geopandas as gpd
+import networkx as nx
+import numpy as np
+import requests
+from shapely.geometry import Point, shape
+
+# Used exclusively by DEM fetching. TODO: put into own data_helper module
+from io import BytesIO
+import rasterio as rio
+import shutil
+import tempfile
+import zipfile
+
+# Used exclusively by 'add_incline' step. TODO: put into own data_helper module
+import scipy
+from shapely.geometry import LinearRing, MultiPoint
+
+sys.path.append('../../src')
+import data_helpers as dh
+
+
+def explode_multilinestrings(df):
+    # Attempt to explode MultiLineString geometries
+    # Note: if this is bottleneck, iterrows is slow. Use apply instead or vector
+    # functions.
+    new_rows = []
+    for idx, row in df.iterrows():
+        if row['geometry'].type == 'MultiLineString':
+            for geom in row['geometry'].geoms:
+                new_row = dict(row)
+                new_row['geometry'] = geom
+                new_rows.append(new_row)
+        else:
+            new_rows.append(dict(row))
+
+    new = gpd.GeoDataFrame(new_rows)
+    new.crs = df.crs
+    return new
+
+
+rule all:
+    input:
+        ['output/sidewalks.geojson',
+         'output/crossings.geojson']
+
+
+rule fetch_bellingham_trans_database:
+    output:
+        'interim/raw/COB_Transportation.gdb'
+    run:
+        url = 'https://data.cob.org/data/gis/FGDB_Files/COB_Transportation.gdb.zip'
+        dh.fetchers.fetch_and_unzip(url, 'COB_Data/COB_Transportation.gdb', output[0])
+
+
+# NOTE: These datasets use MultiCurve geometries to represent sidewalks (and maybe
+# some crossings?), which is a real weird geometry type for that use case. I think it
+# is due to their original use of street polygons. fiona will raise an
+# UnsupportedGeometryTypeError (11) for geometries of this type and won't let you even
+# make an attempt at parsing them yourself. So, we use ogr2ogr on these datasets.
+rule extract_sidewalks:
+    input:
+        'interim/raw/COB_Transportation.gdb'
+    output:
+        'interim/imported/sidewalks.geojson'
+    shell:
+        """
+        ogr2ogr -f "GeoJSON" -nlt "MultiLineString" -t_srs "epsg:4326" {output} {input} "tran_Sidewalks"
+        """
+
+
+rule extract_crossings:
+    input:
+        'interim/raw/COB_Transportation.gdb'
+    output:
+        'interim/imported/crossings.geojson'
+    shell:
+        """
+        ogr2ogr -f "GeoJSON" -nlt "LineString" -t_srs "epsg:4326" {output} {input} "tran_Crosswalks"
+        """
+
+
+rule extract_curbramps:
+    input:
+        'interim/raw/COB_Transportation.gdb'
+    output:
+        'interim/imported/curbramps.geojson'
+    shell:
+        """
+        ogr2ogr -f "GeoJSON" -nlt "Point" -t_srs "epsg:4326" {output} {input} "tran_WheelchairRamps"
+        """
+
+
+rule extract_streets:
+    input:
+        'interim/raw/COB_Transportation.gdb'
+    output:
+        'interim/imported/streets.geojson'
+    shell:
+        """
+        ogr2ogr -f "GeoJSON" -nlt "LineString" -t_srs "epsg:4326" {output} {input} "tran_WhatcomRoads"
+        """
+
+# rule extract_layers:
+#     input:
+#         'interim/raw/COB_Transportation.gdb'
+#     output:
+#          ['interim/imported/streets.geojson',
+#          'interim/imported/curbramps.geojson']
+#     run:
+#         # Read datasets with fiona. Was running into an error on some lines, so we will
+#         # skip those for now.
+#         def gdb_to_gdf(gdb_path, layer):
+#             f = fiona.open(gdb_path, layer=layer)
+#             skipped = 0
+#             features = []
+#             while True:
+#                 try:
+#                     feature = next(f)
+#                     features.append({
+#                         **feature['properties'],
+#                         'geometry': shape(feature['geometry']),
+#                     })
+#                 except StopIteration:
+#                     break
+#                 except fiona.errors.UnsupportedGeometryTypeError:
+#                     skipped += 1
+#
+#             gdf = gpd.GeoDataFrame(features)
+#             gdf.crs = f.crs
+#
+#             return gdf, skipped
+#
+#         gdf_st, count_st = gdb_to_gdf(input[0], 'tran_WhatcomRoads')
+#         print('Skipped ', count_st, ' invalid street geometries')
+#
+#         gdf_cr, count_cr = gdb_to_gdf(input[0], 'tran_WheelchairRamps')
+#         print('Skipped ', count_cr, ' invalid wheelchair ramp geometries')
+#
+#         # Transform into lon-lat
+#         # gdf_sw_wgs84 = gdf_sw.to_crs({'init': 'epsg:4326'})
+#         # bounds = gdf_sw_wgs84.total_bounds
+#         # lon = (bounds[0] + bounds[2]) / 2
+#         # lat = (bounds[1] + bounds[3]) / 2
+#         # utm_zone = dh.utm.lonlat_to_utm_epsg(lon, lat)
+#         # crs = {'init': 'epsg:{}'.format(utm_zone)}
+#         wgs84 = {'init': 'epsg:4326'}
+#
+#         gdf_st = gdf_st.to_crs(wgs84)
+#         gdf_cr = gdf_cr.to_crs(wgs84)
+#
+#         dh.io.gdf_to_geojson(gdf_st, output[1])
+#         dh.io.gdf_to_geojson(gdf_cr, output[3])
+
+
+rule clean_sidewalks:
+    input:
+        'interim/imported/sidewalks.geojson'
+    output:
+        'interim/clean/sidewalks.geojson'
+    run:
+        # The sidewalks data has all the info we need. Just need to rename columns
+        # and values, filter out unused/invalid
+        df = gpd.read_file(input[0])
+        crs = df.crs
+
+        column_map = {
+            'STREETNAME': 'street_name',
+            'SURFACETYPE': 'surface',
+            'STREETSIDE': 'side',
+            'WIDTH': 'width',
+        }
+        df = df.rename(columns=column_map)
+
+        # Translate surface values. If no match, set to null.
+        surface_map = {
+            'ACP': 'asphalt',
+            'ACP/PCC': 'asphalt',
+            'PC': 'concrete',
+            'PCC': 'concerete',
+            'Wood': 'wood',
+        }
+        df['surface'] = df['surface'].apply(lambda x: surface_map.get(x, None))
+
+        # Translate width values from feet to meters
+        df['width'] = df['width'] * 0.3048
+
+        # Drop all unused column names
+        df = df[list(column_map.values()) + ['geometry']]
+
+        # Attempt to explode MultiLineString geometries
+        # Note: if this is bottleneck, iterrows is slow. Use apply instead or vector
+        # functions.
+        df = explode_multilinestrings(df)
+
+        # Add length and default / missing values
+        bounds = df.to_crs({'init': 'epsg:4326'}).total_bounds
+        lon = (bounds[0] + bounds[2]) / 2
+        lat = (bounds[1] + bounds[3]) / 2
+        utm_zone = dh.utm.lonlat_to_utm_epsg(lon, lat)
+        crs = {'init': 'epsg:{}'.format(utm_zone)}
+        df['length'] = df.to_crs(crs)['geometry'].length
+
+        df['layer'] = 0
+
+        df.crs = crs
+
+        dh.io.gdf_to_geojson(df, output[0])
+
+
+rule clean_streets:
+    input:
+        'interim/imported/streets.geojson'
+    output:
+        'interim/clean/streets.geojson'
+    run:
+        # Drop all unused columns. We don't use any metadata now, so that's all of
+        # them except 'geometry'
+        df = gpd.read_file(input[0])
+        crs = df.crs
+        df = gpd.GeoDataFrame(df[['geometry']])
+
+        # Enrich with fake 'layer' data
+        df['layer'] = 0
+
+        # Attempt to explode MultiLineString geometries
+        # Note: if this is bottleneck, iterrows is slow. Use apply instead or vector
+        # functions.
+        df = explode_multilinestrings(df)
+        df.crs = crs
+
+        dh.io.gdf_to_geojson(df, output[0])
+
+
+rule clean_crossings:
+    input:
+        'interim/imported/crossings.geojson'
+    output:
+        'interim/clean/crossings.geojson'
+    run:
+        # The crossings data has info on whether the crossing is marked, but does not
+        # directly have curbramp or street info. That needs to be derived later.
+        df = gpd.read_file(input[0])
+        crs = df.crs
+
+        # Extract marked vs. unmarked. Ignore all other 'crossings'
+        type_map = {
+            'M': 'marked',
+            'U': 'unmarked',
+        }
+        df['TYPE'].apply(lambda x: type_map.get(x, None))
+        df = df[~df.isnull()]
+
+        # Explode MultiLinestrings
+        df = explode_multilinestrings(df)
+
+        # Add length and default / missing values
+        bounds = df.to_crs({'init': 'epsg:4326'}).total_bounds
+        lon = (bounds[0] + bounds[2]) / 2
+        lat = (bounds[1] + bounds[3]) / 2
+        utm_zone = dh.utm.lonlat_to_utm_epsg(lon, lat)
+        crs = {'init': 'epsg:{}'.format(utm_zone)}
+        df['length'] = df.to_crs(crs)['geometry'].length
+
+        # TODO: Add 'street_name' property downstream?
+
+        df.crs = crs
+
+        print(df.geometry.type.unique())
+        dh.io.gdf_to_geojson(df, output[0])
+
+
+rule clean_curbramps:
+    input:
+        'interim/imported/curbramps.geojson'
+    output:
+        'interim/clean/curbramps.geojson'
+    run:
+        # The curb ramp dataset has info on things like ADA compliance, etc, but we're
+        # going to ignore everything except whether it's obstructed, and toss out
+        # all metadata.
+        df = gpd.read_file(input[0])
+        crs = df.crs
+
+        df = df[df['OBSTRUCTION'] != 'Yes']
+
+        df = gpd.GeoDataFrame(df[['geometry']])
+
+        df.crs = crs
+
+        dh.io.gdf_to_geojson(df, output[0])
+
+
+rule add_curbramps_to_crossings:
+    input:
+        ['interim/clean/crossings.geojson',
+         'interim/clean/curbramps.geojson']
+    output:
+        'interim/annotated/crossings.geojson'
+    run:
+        df = gpd.read_file(input[0])
+        cr = gpd.read_file(input[1])
+
+        # Count how many curb ramp points are really close to (effectively intersect)
+        # a given crossing.
+        def n_curbramps(crossing_geom, curbramps_df, dist=0.1):
+            # Use spatial index first, then calculate true distance
+            query = curbramps_df.sindex.intersection(crossing_geom.bounds, objects=True)
+            cr_in_bbox = cr.loc[[q.object for q in query]]['geometry']
+            return (cr_in_bbox.distance(crossing_geom) <= dist).sum()
+
+        # If curb ramp count > 1, set curb ramp flag to yes.
+        df['curbramps'] = df['geometry'].apply(n_curbramps, args=(cr,)) > 1
+        df['curbramps'] = df['curbramps'].astype(int)
+
+        dh.io.gdf_to_geojson(df, output[0])
+
+
+rule fetch_dems:
+    input:
+        'interim/clean/sidewalks.geojson'
+    output:
+        'interim/dem/dem.tif'
+    run:
+        df = gpd.read_file(input[0])
+
+        # Figure out which DEM to use. Should technically determin extent of data and
+        # retrieve + stitch together as many DEMs as necessary. Fingers crossed that
+        # we only need one!
+        # FIXME: Put this functionality in data_helpers
+
+        # TODO: Point for optimization: reproject just one point, not whole dataset
+        df = df.to_crs({'init': 'epsg:4326'})
+
+        bounds = df.total_bounds
+        lon = abs(int((bounds[0] + bounds[2]) / 2) - 1)
+        lat = int((bounds[1] + bounds[3]) / 2) + 1
+
+        baseurl = 'https://prd-tnm.s3.amazonaws.com/StagedProducts/Elevation/13/ArcGrid'
+        url = '{}/USGS_NED_13_n{}w{}_ArcGrid.zip'.format(baseurl, lat, lon)
+
+        # TODO: add progress bar using stream argument + click progress bar
+        response = requests.get(url)
+        response.raise_for_status()
+        zipper = zipfile.ZipFile(BytesIO(response.content))
+        extract_dir = 'grdn{}w{}_13/'.format(lat, lon)
+
+        # Extract everything
+        tempdir = tempfile.mkdtemp()
+        for path in zipper.namelist():
+            if extract_dir in path:
+                if extract_dir == path:
+                    continue
+                extract_path = os.path.join(tempdir, os.path.basename(path))
+                with zipper.open(path) as f:
+                    with open(extract_path, 'wb') as g:
+                        g.write(f.read())
+
+        dem_path = os.path.join(tempdir, 'w001001.adf')
+
+        with rio.open(dem_path) as src:
+            profile = src.profile
+
+            profile.update({'blockysize': 16, 'driver': 'GTiff', 'compress': 'lzw'})
+
+            with rio.open('interim/dem/dem.tif', 'w', **profile) as dst:
+                data = src.read()
+                dst.write(data)
+
+        shutil.rmtree(tempdir)
+
+
+rule intersection_elevations:
+    input:
+        ['interim/dem/dem.tif',
+         'interim/clean/streets.geojson',
+         'interim/clean/sidewalks.geojson']
+    output:
+        'interim/dem/intersection_elevations.geojson'
+    run:
+        dem = rio.open(input[0])
+        st = gpd.read_file(input[1])
+        sw = gpd.read_file(input[2])
+
+        # Use sidewalks extent to limit streets.
+        # TODO: consider having a hard-coded extent polygon / bounding box per-city
+        bbox = sw.total_bounds
+        st = st.loc[[q.object for q in st.sindex.intersection(bbox, objects=True)]]
+
+        st_dem = st.to_crs(dem.crs)
+
+        # Create a graph from the streets
+        G = nx.Graph()
+        for idx, row in st.iterrows():
+            coords = row.geometry.coords
+            start = np.round(coords[0], 6)
+            end = np.round(coords[-1], 6)
+
+            node_start = str(start)
+            node_end = str(end)
+
+            G.add_node(node_start, x=start[0], y=start[1])
+            G.add_node(node_end, x=end[0], y=end[1])
+            # Retain orientation information
+            G.add_edge(node_start, node_end, start=node_start,
+                       geometry=row.geometry,
+                       geometry_dem=st_dem.loc[idx, 'geometry'])
+
+        # Create the geometries for the mask - intersections extended a small
+        # distance
+        rows = []
+        n = 0
+        for node, degree in G.degree:
+            if (degree == 1) or (degree > 2):
+                n += 1
+                # It's an intersection or a dead end
+                for u, v, d in G.edges(node, data=True):
+                    geom = d['geometry']
+                    geom_dem = d['geometry_dem']
+                    if u == d['start']:
+                        x, y = geom.coords[0]
+                        x_dem, y_dem = geom_dem.coords[0]
+                    else:
+                        x, y = geom.coords[-1]
+                        x_dem, y_dem = geom_dem.coords[-1]
+                    try:
+                        elevation = dh.raster_interp.interpolated_value(x_dem, y_dem, dem)
+                    except Exception as e:
+                        print(x_dem)
+                        print(y_dem)
+                        raise e
+
+                    rows.append({
+                        'geometry': Point(x, y),
+                        'elevation': elevation
+                    })
+
+        gdf = gpd.GeoDataFrame(rows)
+        dh.io.gdf_to_geojson(gdf, output[0])
+
+
+rule add_inclines:
+    input:
+        ['interim/clean/sidewalks.geojson',
+         'interim/dem/intersection_elevations.geojson']
+    output:
+        'interim/inclined/sidewalks.geojson'
+    run:
+        sw = gpd.read_file(input[0])
+        el = gpd.read_file(input[1])
+
+        el['x'] = el.geometry.apply(lambda p: p.x)
+        el['y'] = el.geometry.apply(lambda p: p.y)
+
+        convex_hull = LinearRing(MultiPoint(el.geometry).convex_hull.exterior.coords)
+
+        interpolate = scipy.interpolate.LinearNDInterpolator(el[['x', 'y']],
+                                                             el['elevation'],
+                                                             fill_value=-1000)
+
+        sw['ele_start'] = sw.geometry.apply(lambda l: interpolate(*l.coords[0]))
+        sw['ele_end'] = sw.geometry.apply(lambda l: interpolate(*l.coords[-1]))
+
+        bounds = sw.total_bounds
+        lon = (bounds[0] + bounds[2]) / 2
+        lat = (bounds[1] + bounds[3]) / 2
+        utm_zone = dh.utm.lonlat_to_utm_epsg(lon, lat)
+        crs = {'init': 'epsg:{}'.format(utm_zone)}
+        sw['len'] = sw.to_crs(crs).geometry.length
+
+        # If interpolated elevation is -1000, that means we just failed to
+        # interpolate at all. We should 'snap' that point to the nearest valid
+        # section of the interpolator, which is a convex hull of the
+        # intersections.
+        missed = sw.loc[(sw.ele_start == -1000) | (sw.ele_end == -1000)]
+        for idx, row in missed.iterrows():
+            factor = 1
+            if row.ele_start == -1000:
+                start = Point(row.geometry.coords[0])
+                proj_start = convex_hull.interpolate(convex_hull.project(start))
+
+                dx = (proj_start.x - start.x)
+                dy = (proj_start.y - start.y)
+                len = dx**2 + dy**2
+                dx = factor * dx / len
+                dy = factor * dy / len
+                x = proj_start.x + dx
+                y = proj_start.y + dy
+                point_start = Point(x, y)
+                sw.loc[idx, 'ele_start'] = interpolate(*point_start.coords)
+
+            if row.ele_end == -1000:
+                end = Point(row.geometry.coords[-1])
+                proj_end = convex_hull.interpolate(convex_hull.project(end))
+                dx = (proj_end.x - end.x)
+                dy = (proj_end.y - end.y)
+                len = dx**2 + dy**2
+                dx = factor * dx / len
+                dy = factor * dy / len
+                x = proj_end.x + dx
+                y = proj_end.y + dy
+                point_end = Point(x, y)
+                sw.loc[idx, 'ele_end'] = interpolate(*point_end.coords)
+
+        # If there's still some missing, just snap to the closest
+        missed = sw.loc[(sw.ele_start == -1000) | (sw.ele_end == -1000)]
+        for idx, row in missed.iterrows():
+            if row.ele_start == -1000:
+                start = Point(row.geometry.coords[0])
+                idx2 = el.distance(start).sort_values().index[0]
+                sw.loc[idx, 'ele_start'] = el.loc[idx2, 'elevation']
+
+            if row.ele_end == -1000:
+                end = Point(row.geometry.coords[-1])
+                idx2 = el.distance(end).sort_values().index[0]
+                sw.loc[idx, 'ele_end'] = el.loc[idx2, 'elevation']
+
+        sw['incline'] = (sw.ele_end - sw.ele_start) / sw.len
+        # sw = sw.drop(columns=['ele_start', 'ele_end', 'len'])
+
+        # Convert to integer, keep in range [-9999, 9999]
+        sw.incline = (sw.incline * 1000).astype(int)
+        sw.incline = sw.incline.apply(lambda x: min(max(x, -9999), 9999))
+
+        sw = sw.to_crs({'init': 'epsg:4326'})
+
+        dh.io.gdf_to_geojson(sw, output[0])
+
+
+rule finalize:
+    input:
+        ['interim/inclined/sidewalks.geojson',
+         'interim/annotated/crossings.geojson']
+    output:
+        expand('output/{layer}.geojson', layer=['sidewalks', 'crossings'])
+    run:
+        # Convert to lon-lat and put in output directory
+        for (in_path, out_path) in zip(input, output):
+            df = gpd.read_file(in_path)
+            df = df.to_crs({'init': 'epsg:4326'})
+            dh.io.gdf_to_geojson(df, out_path)
