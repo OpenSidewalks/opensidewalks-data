@@ -236,7 +236,8 @@ rule clean_crossings:
     input:
         'interim/imported/crossings.geojson'
     output:
-        'interim/clean/crossings.geojson'
+        ['interim/clean/crossings.geojson',
+         'interim/clean/sidewalk_links.geojson']
     run:
         # The crossings data has info on whether the crossing is marked, but does not
         # directly have curbramp or street info. That needs to be derived later.
@@ -247,12 +248,16 @@ rule clean_crossings:
         type_map = {
             'M': 'marked',
             'U': 'unmarked',
+            'C': 'link',
         }
-        df['TYPE'].apply(lambda x: type_map.get(x, None))
-        df = df[~df.isnull()]
+        df['TYPE'] = df['TYPE'].apply(lambda x: type_map.get(x, None))
+        df = df[~df['TYPE'].isnull()]
 
         # Explode MultiLinestrings
         df = explode_multilinestrings(df)
+
+        # Restrict to useful columns
+        df['marked'] = df['TYPE'].apply(lambda x: True if x == 'marked' else False)
 
         # Add length and default / missing values
         bounds = df.to_crs({'init': 'epsg:4326'}).total_bounds
@@ -264,10 +269,17 @@ rule clean_crossings:
 
         # TODO: Add 'street_name' property downstream?
 
-        df.crs = crs
+        # Separate out 'links' from the rest - these will be treated as sidewalks
+        links_df = df[df['TYPE'] == 'link']
 
-        print(df.geometry.type.unique())
+        df = df[df['TYPE'] != 'link']
+        df = gpd.GeoDataFrame(df[['geometry', 'marked']])
+
+        df.crs = crs
+        links_df.crs = crs
+
         dh.io.gdf_to_geojson(df, output[0])
+        dh.io.gdf_to_geojson(links_df, output[1])
 
 
 rule clean_curbramps:
@@ -289,6 +301,29 @@ rule clean_curbramps:
         df.crs = crs
 
         dh.io.gdf_to_geojson(df, output[0])
+
+
+rule join_sidewalks:
+    input:
+        ['interim/clean/sidewalks.geojson',
+         'interim/clean/sidewalk_links.geojson']
+    output:
+        'interim/joined/sidewalks.geojson'
+    run:
+        sw = gpd.read_file(input[0])
+        sw_links = gpd.read_file(input[1])
+
+        crs = sw.crs
+
+        # Throw out all info on sidewalk links - they are derived from crossings and
+        # don't have anything else useful.
+        sw_links = sw_links[['geometry']]
+
+        # Combine
+        sw = sw.append(sw_links)
+        sw = gpd.GeoDataFrame(sw)
+
+        dh.io.gdf_to_geojson(sw, output[0])
 
 
 rule add_curbramps_to_crossings:
@@ -318,7 +353,7 @@ rule add_curbramps_to_crossings:
 
 rule fetch_dems:
     input:
-        'interim/clean/sidewalks.geojson'
+        'interim/joined/sidewalks.geojson'
     output:
         'interim/dem/dem.tif'
     run:
@@ -374,7 +409,7 @@ rule intersection_elevations:
     input:
         ['interim/dem/dem.tif',
          'interim/clean/streets.geojson',
-         'interim/clean/sidewalks.geojson']
+         'interim/joined/sidewalks.geojson']
     output:
         'interim/dem/intersection_elevations.geojson'
     run:
@@ -441,7 +476,7 @@ rule intersection_elevations:
 
 rule add_inclines:
     input:
-        ['interim/clean/sidewalks.geojson',
+        ['interim/joined/sidewalks.geojson',
          'interim/dem/intersection_elevations.geojson']
     output:
         'interim/inclined/sidewalks.geojson'
