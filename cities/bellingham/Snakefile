@@ -3,7 +3,7 @@ import geopandas as gpd
 import networkx as nx
 import numpy as np
 import requests
-from shapely.geometry import Point, shape
+from shapely.geometry import LineString, Point, shape
 
 # Used exclusively by DEM fetching. TODO: put into own data_helper module
 from io import BytesIO
@@ -15,6 +15,10 @@ import zipfile
 # Used exclusively by 'add_incline' step. TODO: put into own data_helper module
 import scipy
 from shapely.geometry import LinearRing, MultiPoint
+
+# Used exclusively by 'intersect sidewalks' step
+import pandas as pd
+
 
 sys.path.append('../../src')
 import data_helpers as dh
@@ -100,58 +104,6 @@ rule extract_streets:
         """
         ogr2ogr -f "GeoJSON" -nlt "LineString" -t_srs "epsg:4326" {output} {input} "tran_WhatcomRoads"
         """
-
-# rule extract_layers:
-#     input:
-#         'interim/raw/COB_Transportation.gdb'
-#     output:
-#          ['interim/imported/streets.geojson',
-#          'interim/imported/curbramps.geojson']
-#     run:
-#         # Read datasets with fiona. Was running into an error on some lines, so we will
-#         # skip those for now.
-#         def gdb_to_gdf(gdb_path, layer):
-#             f = fiona.open(gdb_path, layer=layer)
-#             skipped = 0
-#             features = []
-#             while True:
-#                 try:
-#                     feature = next(f)
-#                     features.append({
-#                         **feature['properties'],
-#                         'geometry': shape(feature['geometry']),
-#                     })
-#                 except StopIteration:
-#                     break
-#                 except fiona.errors.UnsupportedGeometryTypeError:
-#                     skipped += 1
-#
-#             gdf = gpd.GeoDataFrame(features)
-#             gdf.crs = f.crs
-#
-#             return gdf, skipped
-#
-#         gdf_st, count_st = gdb_to_gdf(input[0], 'tran_WhatcomRoads')
-#         print('Skipped ', count_st, ' invalid street geometries')
-#
-#         gdf_cr, count_cr = gdb_to_gdf(input[0], 'tran_WheelchairRamps')
-#         print('Skipped ', count_cr, ' invalid wheelchair ramp geometries')
-#
-#         # Transform into lon-lat
-#         # gdf_sw_wgs84 = gdf_sw.to_crs({'init': 'epsg:4326'})
-#         # bounds = gdf_sw_wgs84.total_bounds
-#         # lon = (bounds[0] + bounds[2]) / 2
-#         # lat = (bounds[1] + bounds[3]) / 2
-#         # utm_zone = dh.utm.lonlat_to_utm_epsg(lon, lat)
-#         # crs = {'init': 'epsg:{}'.format(utm_zone)}
-#         wgs84 = {'init': 'epsg:4326'}
-#
-#         gdf_st = gdf_st.to_crs(wgs84)
-#         gdf_cr = gdf_cr.to_crs(wgs84)
-#
-#         dh.io.gdf_to_geojson(gdf_st, output[1])
-#         dh.io.gdf_to_geojson(gdf_cr, output[3])
-
 
 rule clean_sidewalks:
     input:
@@ -294,7 +246,9 @@ rule clean_curbramps:
         df = gpd.read_file(input[0])
         crs = df.crs
 
-        df = df[df['OBSTRUCTION'] != 'Yes']
+        # 'Obstruction' appears very frequently and includes non-obstructy things.
+        # Need to dive into free-form text field 'comments' or discard entirely.
+        # df = df[df['OBSTRUCTION'] != 'Yes']
 
         df = gpd.GeoDataFrame(df[['geometry']])
 
@@ -336,24 +290,199 @@ rule add_curbramps_to_crossings:
         df = gpd.read_file(input[0])
         cr = gpd.read_file(input[1])
 
+        bounds = df.total_bounds
+        lon = (bounds[0] + bounds[2]) / 2
+        lat = (bounds[1] + bounds[3]) / 2
+        utm_zone = dh.utm.lonlat_to_utm_epsg(lon, lat)
+        utm = {'init': 'epsg:{}'.format(utm_zone)}
+
+        df = df.to_crs(utm)
+        cr = cr.to_crs(utm)
+
         # Count how many curb ramp points are really close to (effectively intersect)
         # a given crossing.
-        def n_curbramps(crossing_geom, curbramps_df, dist=0.1):
-            # Use spatial index first, then calculate true distance
-            query = curbramps_df.sindex.intersection(crossing_geom.bounds, objects=True)
-            cr_in_bbox = cr.loc[[q.object for q in query]]['geometry']
-            return (cr_in_bbox.distance(crossing_geom) <= dist).sum()
+        DIST_THRESHOLD = 4
+        for idx, row in df.iterrows():
+            crossing_geom = row['geometry']
+
+            bounds = list(crossing_geom.bounds)
+            bounds[0] -= DIST_THRESHOLD
+            bounds[1] -= DIST_THRESHOLD
+            bounds[2] += DIST_THRESHOLD
+            bounds[3] += DIST_THRESHOLD
+
+            hits = [q.object for q in cr.sindex.intersection(bounds, objects=True)]
+            dists = cr.loc[hits]['geometry'].distance(crossing_geom)
+            n = (dists < DIST_THRESHOLD).sum()
+            df.loc[idx, 'n_curbramps'] = n
 
         # If curb ramp count > 1, set curb ramp flag to yes.
-        df['curbramps'] = df['geometry'].apply(n_curbramps, args=(cr,)) > 1
+        # df['n_curbramps'] = df['geometry'].apply(n_curbramps)
+        df['curbramps'] = df['n_curbramps'] > 1
         df['curbramps'] = df['curbramps'].astype(int)
+        df['length'] = df['geometry'].length
+
+        # example = df.iloc[546]
+
+        # ebounds = list(example['geometry'].bounds)
+        # print(ebounds)
+        # ebounds[0] -= 1
+        # ebounds[1] -= 1
+        # ebounds[2] += 1
+        # ebounds[3] += 1
+        # print(ebounds)
+        # hits = [q.object for q in cr.sindex.intersection(ebounds, objects=True)]
+        # print(hits)
+        # print(cr.loc[hits].distance(example['geometry']))
+        # print(cr.loc[hits].distance(example['geometry']) <= 1)
+        # print((cr.loc[hits].distance(example['geometry']) <= 1).sum())
+
+        df = df.to_crs({'init': 'epsg:4326'})
 
         dh.io.gdf_to_geojson(df, output[0])
 
 
-rule fetch_dems:
+rule intersect_sidewalks:
     input:
         'interim/joined/sidewalks.geojson'
+    output:
+        'interim/intersected/sidewalks_self.geojson'
+    run:
+        df = gpd.read_file(input[0])
+
+        # Convert to UTM so everything can be calculated in meters
+        bounds = df.total_bounds
+        lon = (bounds[0] + bounds[2]) / 2
+        lat = (bounds[1] + bounds[3]) / 2
+        utm_zone = dh.utm.lonlat_to_utm_epsg(lon, lat)
+        crs = {'init': 'epsg:{}'.format(utm_zone)}
+        df = df.to_crs(crs)
+
+        # 3-step plan:
+        # 1) Find all endpoint-endpoint relationships to snap, store in dictionary(s)
+        #    for easy lookup later on. These endpoints will all be readjusted to an
+        #    appropriate shared value.
+        # 2) Find all endpoint-line relationships to snap. That is, one endpoint should
+        #    snap to part of another line, but not the exact endpoint of that other
+        #    line. This implies (1) moving one end of one line and (2) splitting
+        #    another line.
+        # 3) Find all 'true' intersections between lines. Endpoints will be ruled out
+        #    using steps 1 and 2. Intersections imply a new shared point and splitting
+        #    2 lines.
+
+        # TODO: optimize. These are candidates for optimization:
+        # 1) Replace .iterrows() with .apply functions
+
+        DIST_THRESHOLD = 0.1
+        PRECISION = 1
+
+        df['split'] = df['geometry'].apply(lambda x: [])
+
+        # Step 1: endpoint-endpoint snapping. Use simple strategy of rounding to a
+        # certain precision (in this case, 1 = 1 decimal place, or 0.1 meters)
+        starts = pd.DataFrame({
+            'coordinates': df['geometry'].apply(lambda x: tuple(np.round(x.coords[0], PRECISION))),
+            'idx': df.index,
+            'type': 'start',
+        })
+        lasts = pd.DataFrame({
+            'coordinates': df['geometry'].apply(lambda x: tuple(np.round(x.coords[-1], PRECISION))),
+            'idx': df.index,
+            'type': 'last',
+        })
+        ends = pd.concat([starts, lasts])
+        for coord, grp in ends.groupby('coordinates').groups:
+            if grp.shape:
+                # We've got grouped-together endpoints! These should be merged to a new
+                # value. Save this new value back to a new column in the original df.
+                new_x = grp.apply(lambda x: x[0]).mean()
+                new_y = grp.apply(lambda x: x[1]).mean()
+                starts.loc[grp[grp['type'] == 'start']['idx'], 'coordinates'] = (new_x, new_y)
+                lasts.loc[grp[grp['type'] == 'last']['idx'], 'coordinates'] = (new_x, new_y)
+        ends = pd.concat([starts, lasts])
+        ends['geometry'] = ends['coordinates'].apply(lambda x: Point(x))
+        ends = gpd.GeoDataFrame(ends)
+
+        # 'ends' is now a GeoDataFrame of potentially-adjusted end coordinates. We will
+        # use this data structure to query nearby lines - but throw out any that are
+        # just duplicate 'hits' for endpoints. The remaining lines need to be split.
+
+        # Step 2: Update the lines with new ends. When it comes time to split any
+        # sidewalk lines, it will be advantageous to use the 'updated' data, avoiding
+        # the need to track which pieces came from which sidewalks.
+        for sw_idx, grp in ends.groupby('idx'):
+            coords = list(df.loc[sw_idx, 'geometry'].coords)
+            for idx, row in grp.iterrows():
+                if row['type'] == 'start':
+                    coords[0] = row['coordinates']
+                else:
+                    coords[-1] = row['coordinates']
+            df.loc[sw_idx, 'geometry'] = LineString(coords)
+
+        # Step 3: query for places where endpoints meet lines, implying that the line
+        # needs to be split.
+        for idx, row in ends.iterrows():
+            point = row['geometry']
+
+            bounds = []
+            bounds.append(point.x - DIST_THRESHOLD)
+            bounds.append(point.y - DIST_THRESHOLD)
+            bounds.append(point.x + DIST_THRESHOLD)
+            bounds.append(point.y + DIST_THRESHOLD)
+
+            query = df.sindex.intersection(bounds, objects=True)
+            sw_rows = df.loc[[q.object for q in query]]
+            sw_rows = sw_rows[sw_rows.distance(point) < DIST_THRESHOLD]
+
+            lengths = sw_rows['geometry'].length
+            distances_along = sw_rows.project(point)
+            not_starts = distances_along > (DIST_THRESHOLD * 2)
+            not_lasts = distances_along < (lengths - DIST_THRESHOLD * 2)
+            not_ends = not_starts & not_lasts
+
+            if not_ends.any():
+                # Grab the closest one and split it
+                sorted_distances = distances_along[not_ends].sort_values()
+                idx2 = sorted_distances.index[0]
+                distance = sorted_distances.iloc[0]
+
+                # There are non-endpoint hits - these geometries should be split at
+                # the projected point(s).
+                df.loc[idx2, 'split'].append(distance)
+
+                # The original point should also be set to the projected point
+                new_point = df.loc[idx2, 'geometry'].interpolate(distance)
+                ends.loc[idx, 'geometry'] = new_point
+
+        # Step 4: split the lines
+        new_rows = []
+        need_splitting = df[df['split'].apply(len) > 0]
+        for idx, row in need_splitting.iterrows():
+            geometry = row['geometry']
+            for distance in sorted(set(row['split']), reverse=True):
+                # print('--------------')
+                # print(geometry.wkt)
+                # print(list(geometry.coords))
+                # print(geometry.length, distance)
+                x = dh.geometry.cut(geometry, distance)
+                geometry, tail = dh.geometry.cut(geometry, distance)
+                new_row = df.loc[idx].copy(deep=True)
+                new_row['geometry'] = tail
+                new_rows.append(new_row)
+            df.loc[idx, 'geometry'] = geometry
+
+        new_df = gpd.GeoDataFrame(new_rows)
+
+        combined_df = gpd.GeoDataFrame(pd.concat([df, new_df]))
+        combined_df.crs = crs
+        df_wgs84 = combined_df.to_crs({'init': 'epsg:4326'})
+
+        dh.io.gdf_to_geojson(df_wgs84, output[0])
+
+
+rule fetch_dems:
+    input:
+        'interim/intersected/sidewalks_self.geojson'
     output:
         'interim/dem/dem.tif'
     run:
@@ -409,7 +538,7 @@ rule intersection_elevations:
     input:
         ['interim/dem/dem.tif',
          'interim/clean/streets.geojson',
-         'interim/joined/sidewalks.geojson']
+         'interim/intersected/sidewalks_self.geojson']
     output:
         'interim/dem/intersection_elevations.geojson'
     run:
@@ -476,8 +605,9 @@ rule intersection_elevations:
 
 rule add_inclines:
     input:
-        ['interim/joined/sidewalks.geojson',
-         'interim/dem/intersection_elevations.geojson']
+        ['interim/intersected/sidewalks_self.geojson',
+         'interim/dem/intersection_elevations.geojson',
+         'interim/joined/sidewalks.geojson']
     output:
         'interim/inclined/sidewalks.geojson'
     run:
@@ -502,6 +632,11 @@ rule add_inclines:
         utm_zone = dh.utm.lonlat_to_utm_epsg(lon, lat)
         crs = {'init': 'epsg:{}'.format(utm_zone)}
         sw['len'] = sw.to_crs(crs).geometry.length
+
+        # Remove zero-length geometries. These are cases where the start and end
+        # points are the same. For Bellingham, these apply to very short and
+        # disconnected lines that might just be artifacts of some other process.
+        sw = sw[sw['len'] != 0]
 
         # If interpolated elevation is -1000, that means we just failed to
         # interpolate at all. We should 'snap' that point to the nearest valid
@@ -554,6 +689,7 @@ rule add_inclines:
         # sw = sw.drop(columns=['ele_start', 'ele_end', 'len'])
 
         # Convert to integer, keep in range [-9999, 9999]
+
         sw.incline = (sw.incline * 1000).astype(int)
         sw.incline = sw.incline.apply(lambda x: min(max(x, -9999), 9999))
 

@@ -4,12 +4,17 @@ def lonlat_to_utm_epsg(lon, lat):
     return int(utm_zone_epsg)
 
 
-def gdf_wgs84_to_utm(gdf):
-    # Random point - should probably find centroid or something
-    lon, lat = gdf.iloc[0]['geometry'].coords[0]
-    zone = lonlat_to_utm_epsg(lon, lat)
+def gdf_to_utm(gdf):
+    # Convert to wgs84 to get lon-lat info
+    gdf_wgs84 = gdf.to_crs({'init': 'epsg:4326'})
 
-    gdf.crs = {'init': 'epsg:4326'}
-    new = gdf.to_crs({'init': 'epsg:{}'.format(zone)})
+    # Grab the roughly center point
+    bounds = gdf_wgs84.total_bounds
+    lon = (bounds[0] + bounds[2]) / 2
+    lat = (bounds[1] + bounds[3]) / 2
+    utm_zone = lonlat_to_utm_epsg(lon, lat)
+    utm_crs = {'init': 'epsg:{}'.format(utm_zone)}
 
-    return new
+    gdf_utm = gdf.to_crs(utm_crs)
+
+    return gdf_utm
