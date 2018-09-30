@@ -351,12 +351,8 @@ rule intersect_sidewalks:
         df = gpd.read_file(input[0])
 
         # Convert to UTM so everything can be calculated in meters
-        bounds = df.total_bounds
-        lon = (bounds[0] + bounds[2]) / 2
-        lat = (bounds[1] + bounds[3]) / 2
-        utm_zone = dh.utm.lonlat_to_utm_epsg(lon, lat)
-        crs = {'init': 'epsg:{}'.format(utm_zone)}
-        df = df.to_crs(crs)
+        df = dh.utm.gdf_to_utm(df)
+        crs = df.crs
 
         # 3-step plan:
         # 1) Find all endpoint-endpoint relationships to snap, store in dictionary(s)
@@ -454,9 +450,142 @@ rule intersect_sidewalks:
                 new_point = df.loc[idx2, 'geometry'].interpolate(distance)
                 ends.loc[idx, 'geometry'] = new_point
 
-        # Step 4: split the lines
+        # Step 4: Find line-line intersections
+        ixns = []
+        for idx, row in df.iterrows():
+            query = df.sindex.intersection(row.geometry.bounds, objects=True)
+            sindex_matches = [q.object for q in query if q.object != idx]
+            df_sindex_matches = df.loc[sindex_matches]
+            intersects = df_sindex_matches.intersects(row.geometry)
+            if intersects.any():
+                df_matches = df_sindex_matches[intersects]
+
+                # Now we have a small data frame of truly (non-self) intersecting sidewalks
+                # Take the point at which to split and toss it on the pile
+
+                # Points of intersection
+                points = list(df_matches['geometry'].apply(lambda x: x.intersection(row.geometry)))
+
+                # Distance along
+                for point in points:
+                    if point.type == 'Point':
+                        ixns.append(point)
+                        dist_along = row['geometry'].project(point)
+                        df.loc[idx, 'split'].append(dist_along)
+
+        test = gpd.GeoDataFrame(geometry=ixns)
+        test.crs = crs
+        dh.io.gdf_to_geojson(test, 'test.geojson')
+
+        # Step 5: split the lines
         new_rows = []
         need_splitting = df[df['split'].apply(len) > 0]
+        for idx, row in need_splitting.iterrows():
+            geometry = row['geometry']
+            for distance in sorted(set(row['split']), reverse=True):
+                x = dh.geometry.cut(geometry, distance)
+                geoms = dh.geometry.cut(geometry, distance)
+                if len(geoms) < 2:
+                    # There has been an error, probably duplicate points - skip cutting
+                    continue
+                geometry, tail = geoms
+                new_row = df.loc[idx].copy(deep=True)
+                new_row['geometry'] = tail
+                new_rows.append(new_row)
+            df.loc[idx, 'geometry'] = geometry
+
+            # Drop the pre-split
+            df.drop(idx)
+
+        new_df = gpd.GeoDataFrame(new_rows)
+
+        combined_df = gpd.GeoDataFrame(pd.concat([df, new_df]))
+        combined_df.crs = crs
+        df_wgs84 = combined_df.to_crs({'init': 'epsg:4326'})
+
+        # FIXME: Need to snap endpoints again - they are not properly-organized/shared
+        # and, in particular, crossings + sidewalks end up just far enough away from
+        # one another to break the graph
+
+        # FIXME: Short paths connecting to crossings should be set to zero incline
+
+        dh.io.gdf_to_geojson(df_wgs84, output[0])
+
+
+rule intersect_sidewalks_crossings:
+    input:
+        ['interim/intersected/sidewalks_self.geojson',
+         'interim/annotated/crossings.geojson']
+    output:
+        'interim/intersected/sidewalks.geojson'
+    run:
+        sw = gpd.read_file(input[0])
+        cr = gpd.read_file(input[1])
+
+        # Convert to UTM so everything can be calculated in meters
+        sw = dh.utm.gdf_to_utm(sw)
+        cr = dh.utm.gdf_to_utm(cr)
+
+        crs = sw.crs
+
+        # Plan:
+        # 1) Find crossing endpoint-sidewalk lines to snap. Record distance along the
+        #    sidewalk to 'snap'
+        # 2) Split the sidewalks at those points
+
+        DIST_THRESHOLD = 0.1
+        PRECISION = 1
+
+        sw['split'] = sw['geometry'].apply(lambda x: [])
+
+        # Step 1: crossing endpoint - sidewalk line snapping.
+        starts = pd.DataFrame({
+            'coordinates': cr['geometry'].apply(lambda x: tuple(np.round(x.coords[0], PRECISION))),
+        })
+        lasts = pd.DataFrame({
+            'coordinates': cr['geometry'].apply(lambda x: tuple(np.round(x.coords[-1], PRECISION))),
+        })
+        ends = pd.concat([starts, lasts])
+        ends['geometry'] = ends['coordinates'].apply(lambda x: Point(x))
+        ends = gpd.GeoDataFrame(ends)
+
+        # FIXME: we should probably edit the crossings as well, to ensure they meet
+        # end-to-end within a very small delta.
+
+        # Query for places where endpoints meet lines, implying that the line needs to
+        # be split.
+        for idx, row in ends.iterrows():
+            point = row['geometry']
+
+            bounds = []
+            bounds.append(point.x - DIST_THRESHOLD)
+            bounds.append(point.y - DIST_THRESHOLD)
+            bounds.append(point.x + DIST_THRESHOLD)
+            bounds.append(point.y + DIST_THRESHOLD)
+
+            query = sw.sindex.intersection(bounds, objects=True)
+            sw_rows = sw.loc[[q.object for q in query]]
+            sw_rows = sw_rows[sw_rows.distance(point) < DIST_THRESHOLD]
+
+            lengths = sw_rows['geometry'].length
+            distances_along = sw_rows.project(point)
+            not_starts = distances_along > (DIST_THRESHOLD * 2)
+            not_lasts = distances_along < (lengths - DIST_THRESHOLD * 2)
+            not_ends = not_starts & not_lasts
+
+            if not_ends.any():
+                # Grab the closest one and split it
+                sorted_distances = distances_along[not_ends].sort_values()
+                idx2 = sorted_distances.index[0]
+                distance = sorted_distances.iloc[0]
+
+                # There are non-endpoint hits - these geometries should be split at
+                # the projected point(s).
+                sw.loc[idx2, 'split'].append(distance)
+
+        # Step 3: split the lines
+        new_rows = []
+        need_splitting = sw[sw['split'].apply(len) > 0]
         for idx, row in need_splitting.iterrows():
             geometry = row['geometry']
             for distance in sorted(set(row['split']), reverse=True):
@@ -466,23 +595,31 @@ rule intersect_sidewalks:
                 # print(geometry.length, distance)
                 x = dh.geometry.cut(geometry, distance)
                 geometry, tail = dh.geometry.cut(geometry, distance)
-                new_row = df.loc[idx].copy(deep=True)
+                new_row = sw.loc[idx].copy(deep=True)
                 new_row['geometry'] = tail
                 new_rows.append(new_row)
-            df.loc[idx, 'geometry'] = geometry
+            sw.loc[idx, 'geometry'] = geometry
 
-        new_df = gpd.GeoDataFrame(new_rows)
+        new_sw = gpd.GeoDataFrame(new_rows)
 
-        combined_df = gpd.GeoDataFrame(pd.concat([df, new_df]))
+        # FIXME: do we need to drop the 'old' rows?
+        combined_df = gpd.GeoDataFrame(pd.concat([sw, new_sw]))
         combined_df.crs = crs
-        df_wgs84 = combined_df.to_crs({'init': 'epsg:4326'})
+        sw_wgs84 = combined_df.to_crs({'init': 'epsg:4326'})
 
-        dh.io.gdf_to_geojson(df_wgs84, output[0])
+        # FIXME: there are precision issues with these snapped coordinates: they are up
+        # to ~7 mm away from one another. This isn't an issue in visualization, but our
+        # routing graph requires virtually perfect precision: the 7th lon-lat decimal
+        # place, which counts for ~11 mm depending on the lat.
+
+        # The routing server has been rounded down to a precision of 6 in the meantime
+
+        dh.io.gdf_to_geojson(sw_wgs84, output[0])
 
 
 rule fetch_dems:
     input:
-        'interim/intersected/sidewalks_self.geojson'
+        'interim/intersected/sidewalks.geojson'
     output:
         'interim/dem/dem.tif'
     run:
@@ -538,7 +675,7 @@ rule intersection_elevations:
     input:
         ['interim/dem/dem.tif',
          'interim/clean/streets.geojson',
-         'interim/intersected/sidewalks_self.geojson']
+         'interim/intersected/sidewalks.geojson']
     output:
         'interim/dem/intersection_elevations.geojson'
     run:
@@ -605,7 +742,7 @@ rule intersection_elevations:
 
 rule add_inclines:
     input:
-        ['interim/intersected/sidewalks_self.geojson',
+        ['interim/intersected/sidewalks.geojson',
          'interim/dem/intersection_elevations.geojson',
          'interim/joined/sidewalks.geojson']
     output:
