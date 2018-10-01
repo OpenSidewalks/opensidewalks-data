@@ -835,10 +835,127 @@ rule add_inclines:
         dh.io.gdf_to_geojson(sw, output[0])
 
 
-rule finalize:
+rule snap:
     input:
         ['interim/inclined/sidewalks.geojson',
          'interim/annotated/crossings.geojson']
+    output:
+        ['interim/snapped/sidewalks.geojson',
+         'interim/snapped/crossings.geojson']
+    run:
+        sw = gpd.read_file(input[0])
+        cr = gpd.read_file(input[1])
+
+        THRESHOLD1 = 0.1
+
+        #
+        # Snap the endpoints of the dataset together within a threshold.
+        #
+        # TODO: work into a helper function, this is reusable
+
+        # Combine into single GeoDataFrame for clustering of endpoints
+        datasets = [sw, cr]
+        combined = []
+        for i, dataset in enumerate(datasets):
+            copy = dataset[['geometry']].copy(deep=True)
+            copy['_dataset_i'] = i
+            combined.append(copy)
+
+        df = pd.concat(combined)
+
+        # Reset the index so every row has a unique entry
+        df = df.reset_index(drop=True)
+
+        # Convert to UTM so everything is in meters
+        df = dh.utm.gdf_to_utm(df)
+
+        # Clustering strategy:
+        # 1) Clusters start as every single endpoint, i.e. there are 2 * rows of them
+        # 2) Use spatial index with a small box to start grouping clusters together,
+        #    i.e. making new ones. Will 'touch' all points until they've all been
+        #    regrouped. Grouping will be, essentially, recursive.
+        # 3) TODO: As a final clean-up, there *might* be a final clustering attempt
+        #    with a slightly higher distance threshold.
+        # TODO: this strategy is very slow. Haven't profiled it, but something about it
+        # is much slower than expected.
+        # IDEA: Create 'buffered' bounding boxes of endpoints and create a graph based
+        # on spatial index matches: i <-> j edges. Connected subgraphs are clusters.
+        starts = df.geometry.apply(lambda x: Point(x.coords[0]))
+        lasts = df.geometry.apply(lambda x: Point(x.coords[-1]))
+        ends = gpd.GeoDataFrame(geometry=pd.concat([starts, lasts]))
+        ends['cluster'] = None
+        start_labels = [1 for i in range(df.shape[0])]
+        end_labels = [0 for i in range(df.shape[0])]
+        ends['start'] = start_labels + end_labels
+        ends['df_idx'] = 2 * list(df.index)
+        # Reindex: the starts/lasts duplicate the main table's index
+        ends = ends.reset_index(drop=True)
+
+        #
+        # Cluster!
+        #
+        cluster_n = 0
+        # Note: there are a lot of redundant calculations done here, but the spatial
+        # index may make it plenty fast
+        for idx, end in ends.iterrows():
+            bounds = list(end['geometry'].bounds)
+            bounds[0] -= THRESHOLD1
+            bounds[1] -= THRESHOLD1
+            bounds[2] += THRESHOLD1
+            bounds[3] += THRESHOLD1
+
+            query = ends.sindex.intersection(bounds, objects=True)
+            candidate_idxs = [q.object for q in query]
+            candidates = ends.loc[candidate_idxs]
+
+            # If the rows are already in cluster(s), merge the clusters and assign all to
+            # the lowest-number cluster
+            has_cluster = candidates[~candidates['cluster'].isnull()]
+            if has_cluster.shape[0]:
+                # There are already clusters!
+                cluster_id = has_cluster['cluster'].min()
+            else:
+                cluster_id = cluster_n
+                cluster_n += 1
+            ends.loc[candidate_idxs, 'cluster'] = cluster_id
+
+        for cluster_id, grp in ends.groupby('cluster'):
+            if grp.shape[0] < 2:
+                # There's only one point in this group - no need to change.
+                continue
+            # Average the point coordinates
+            xs = grp['geometry'].apply(lambda p: p.x)
+            ys = grp['geometry'].apply(lambda p: p.y)
+            x = xs.mean()
+            y = ys.mean()
+            geom = Point(x, y)
+
+            for idx, row in grp.iterrows():
+                coords = list(df.loc[row['df_idx']]['geometry'].coords)
+                if row['start']:
+                    coords[0] = geom
+                else:
+                    coords[-1] = geom
+
+                df.loc[row['df_idx'], 'geometry'] = LineString(coords)
+
+
+        df = df.to_crs({'init': 'epsg:4326'})
+        for i, dataset in enumerate(datasets):
+            dataset['geometry'] = list(df[df['_dataset_i'] == i]['geometry'])
+            # Clean up - some geometries may have been invalidated by moving coordinates
+            dataset = dataset.loc[dataset.geometry.length != 0]
+            # Just in case
+            datasets[i] = dataset
+
+        dh.io.gdf_to_geojson(datasets[0], output[0])
+        dh.io.gdf_to_geojson(datasets[1], output[1])
+
+
+rule finalize:
+    input:
+        ['interim/snapped/sidewalks.geojson',
+         'interim/snapped/crossings.geojson']
     output:
         expand('output/{layer}.geojson', layer=['sidewalks', 'crossings'])
     run:
