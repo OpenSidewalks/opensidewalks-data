@@ -835,9 +835,53 @@ rule add_inclines:
         dh.io.gdf_to_geojson(sw, output[0])
 
 
-rule snap:
+rule flatten_intersections:
     input:
         ['interim/inclined/sidewalks.geojson',
+         'interim/annotated/crossings.geojson']
+    output:
+        'interim/flattened/sidewalks.geojson'
+    run:
+        MIN_LENGTH = 1
+        MAX_LENGTH = 5
+        THRESHOLD = 0.1
+
+        sw = gpd.read_file(input[0])
+        cr = gpd.read_file(input[1])
+
+        sw = dh.utm.gdf_to_utm(sw)
+        cr = dh.utm.gdf_to_utm(cr)
+
+        # Strategy:
+        # (1) Figure out which sidewalk lines are touching crossings (by distance)
+        # (2) Sidewalks that touch crossings and fall below minimum length (e.g. 3
+        #     meters) will have their incline set to zero.
+
+        for idx, row in sw.iterrows():
+            if row['geometry'].length > MAX_LENGTH:
+                # This is a long geom - use the estimated incline
+                continue
+            if row['geometry'].length < MIN_LENGTH:
+                # This is a very short geom - the estimated incline can't be trusted
+                # FIXME: this is a workaround for short segments near intersections,
+                # in addition to the general concern noted above. This might be better
+                # addressed by a network-based approach or improvements to the incline
+                # estimator
+                sw.loc[idx, 'incline'] = 0
+                continue
+            query = cr.sindex.intersection(row['geometry'].bounds, objects=True)
+            cr_bbox = cr.loc[[q.object for q in query]]
+            if (cr_bbox.distance(row['geometry']) < THRESHOLD).any():
+                sw.loc[idx, 'incline'] = 0
+
+        sw = sw.to_crs({'init': 'epsg:4326'})
+
+        dh.io.gdf_to_geojson(sw, output[0])
+
+
+rule snap:
+    input:
+        ['interim/flattened/sidewalks.geojson',
          'interim/annotated/crossings.geojson']
     output:
         ['interim/snapped/sidewalks.geojson',
