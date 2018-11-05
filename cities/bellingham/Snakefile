@@ -129,7 +129,7 @@ rule clean_sidewalks:
             'ACP': 'asphalt',
             'ACP/PCC': 'asphalt',
             'PC': 'concrete',
-            'PCC': 'concerete',
+            'PCC': 'concrete',
             'Wood': 'wood',
         }
         df['surface'] = df['surface'].apply(lambda x: surface_map.get(x, None))
