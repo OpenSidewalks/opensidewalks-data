@@ -1,31 +1,35 @@
+from io import BytesIO
+import json
+import os
+import shutil
+import sys
+import tempfile
+import zipfile
+
 import crossify.intersections
 import crossify.crossings
 from esridump.dumper import EsriDumper
 import geobuf
 import geopandas as gpd
-from io import BytesIO
-import json
-import os
 import pandas as pd
 import networkx as nx
 import numpy as np
 import rasterio as rio
 import requests
 import scipy
-import shutil
-import sys
 import sidewalkify
 from shapely.geometry import mapping, shape
 from shapely.geometry import Point, LinearRing, LineString, MultiPoint, Polygon
-import tempfile
-import zipfile
+from snakemake.remote.HTTP import RemoteProvider as HTTPRemoteProvider
 
 sys.path.append('../../src')
 import data_helpers as dh
 
+HTTP = HTTPRemoteProvider()
+
 rule all:
     input:
-        expand('output/{layer}.geobuf', layer=['sidewalks', 'sidewalks_network',
+        expand('output/{layer}.geojson', layer=['sidewalks', 'sidewalks_network',
                                                 'crossings', 'elevator_paths'])
 
 rule fetch_sidewalks:
@@ -66,12 +70,12 @@ rule fetch_streets:
 
 
 rule fetch_snd:
+    input:
+        HTTP.remote('http://data-seattlecitygis.opendata.arcgis.com/datasets/0dd0ad79dc3845f3a296215d7c448a0d_2.geojson')
     output:
         'interim/raw/snd.geojson'
     run:
-        url = 'https://data.seattle.gov/api/views/afip-2mzr/files/08b54e93-1443-4525-9f9a-adf5b03b67d6?filename=Street_Network_Database.zip'
-        df = dh.fetchers.fetch_shapefile(url, 'StatePlane/Street_Network_Database.shp')
-        dh.io.gdf_to_geojson(df, output[0])
+        shell('mv {input} {output}')
 
 
 rule fetch_curbramps:
@@ -202,8 +206,8 @@ rule clean_streets:
         df.loc[below_grade.index, 'layer'] = -1
 
         # SND elevation info
-        below = snd.loc[snd.STRUCTURE_ == 0, 'COMPKEY']
-        above = snd.loc[snd.STRUCTURE_ == 2, 'COMPKEY']
+        below = snd.loc[snd.STRUCTURE_TYPE == 0, 'COMPKEY']
+        above = snd.loc[snd.STRUCTURE_TYPE == 2, 'COMPKEY']
         df.loc[df.pkey.isin(below), 'layer'] = -1
         df.loc[df.pkey.isin(above), 'layer'] = 1
 
@@ -215,7 +219,7 @@ rule clean_streets:
             'walkways': 7,
             'trails': 8
         }
-        df = df[~df.pkey.isin(snd.loc[snd.SEGMENT_TY.isin(codemap.values()), 'COMPKEY'])]
+        df = df[~df.pkey.isin(snd.loc[snd.SEGMENT_TYPE.isin(codemap.values()), 'COMPKEY'])]
 
         # Drop trails
         df = df[~(df.name.str.contains(' TRL ') | df.name.str.endswith(' TRL'))]
@@ -297,6 +301,9 @@ rule clean_sidewalks:
             if grp.shape[0] > 1:
                 # More than one sidewalk on this side! Keep only the first entry
                 df = df.drop(grp.iloc[1:].index)
+
+        # Drop unused columns
+        df = df[['geometry'] + list(rename.values())]
 
         # Write to file
         dh.io.gdf_to_geojson(df, output[0])
@@ -437,7 +444,7 @@ rule draw_sidewalks:
         # st = st.loc[idx]
 
         # Reproject into UTM
-        st = dh.utm.gdf_wgs84_to_utm(st)
+        st = dh.utm.gdf_to_utm(st)
         crs = st.crs
 
         # Draw sidewalks
@@ -593,8 +600,8 @@ rule draw_crossings:
         #         st = st.drop(grp.iloc[1:].index)
 
         # Reproject into UTM
-        sw = dh.utm.gdf_wgs84_to_utm(sw)
-        st = dh.utm.gdf_wgs84_to_utm(st)
+        sw = dh.utm.gdf_to_utm(sw)
+        st = dh.utm.gdf_to_utm(st)
 
         keep = ['id', 'pkey_left', 'pkey_right']
         swap = [['pkey_left', 'pkey_right']]
@@ -697,8 +704,8 @@ rule annotate_crossings_with_crosswalks:
         cw = gpd.read_file(input[1])
 
         # Reproject into UTM
-        df = dh.utm.gdf_wgs84_to_utm(df)
-        cw = dh.utm.gdf_wgs84_to_utm(cw)
+        df = dh.utm.gdf_to_utm(df)
+        cw = dh.utm.gdf_to_utm(cw)
 
         # Mark as having crosswalks if one is nearby
         def marked_within_dist(row, dist=3.5, default=None):
@@ -772,10 +779,10 @@ rule add_midblock_crosswalks:
         sw = gpd.read_file(input[2])
         st = gpd.read_file(input[3])
 
-        cw = dh.utm.gdf_wgs84_to_utm(cw)
-        cr = dh.utm.gdf_wgs84_to_utm(cr)
-        sw = dh.utm.gdf_wgs84_to_utm(sw)
-        st = dh.utm.gdf_wgs84_to_utm(st)
+        cw = dh.utm.gdf_to_utm(cw)
+        cr = dh.utm.gdf_to_utm(cr)
+        sw = dh.utm.gdf_to_utm(sw)
+        st = dh.utm.gdf_to_utm(st)
 
         # Sanitize data for comparisons
         st = st.loc[~st['pkey_left'].isnull()]
@@ -968,8 +975,8 @@ rule add_inclines:
         sw = gpd.read_file(input[0])
         el = gpd.read_file(input[1])
 
-        sw = dh.utm.gdf_wgs84_to_utm(sw)
-        el = dh.utm.gdf_wgs84_to_utm(el)
+        sw = dh.utm.gdf_to_utm(sw)
+        el = dh.utm.gdf_to_utm(el)
 
         el['x'] = el.geometry.apply(lambda p: p.x)
         el['y'] = el.geometry.apply(lambda p: p.y)
@@ -1102,9 +1109,9 @@ rule network:
         sw.crs = {'init': 'epsg:4326'}
         cr.crs = {'init': 'epsg:4326'}
 
-        sw = dh.utm.gdf_wgs84_to_utm(sw)
-        cr = dh.utm.gdf_wgs84_to_utm(cr)
-        el = dh.utm.gdf_wgs84_to_utm(el)
+        sw = dh.utm.gdf_to_utm(sw)
+        cr = dh.utm.gdf_to_utm(cr)
+        el = dh.utm.gdf_to_utm(el)
 
         sw_network = dh.ped_network.network_sidewalks(sw, [cr, el])
 
@@ -1127,11 +1134,7 @@ rule finalize:
          'interim/networked/elevator_paths.geojson',
          'interim/networked/sidewalks.geojson']
     output:
-        expand('output/{layer}.geobuf', layer=['sidewalks', 'crossings', 'elevator_paths', 'sidewalks_network'])
+        expand('output/{layer}.geojson', layer=['sidewalks', 'crossings', 'elevator_paths', 'sidewalks_network'])
     run:
-        for path_in, path_out in zip(input, output):
-            with open(path_in) as f:
-                geojson = json.load(f)
-                buf = geobuf.encode(geojson)
-            with open(path_out, 'wb') as g:
-                g.write(buf)
+        for in_path, out_path in zip(input, output):
+            shell('cp {inpath} {outpath}'.format(inpath=in_path, outpath=out_path))
