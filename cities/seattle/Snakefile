@@ -29,8 +29,8 @@ HTTP = HTTPRemoteProvider()
 
 rule all:
     input:
-        expand('output/{layer}.geojson', layer=['sidewalks', 'sidewalks_network',
-                                                'crossings', 'elevator_paths'])
+        expand('output/{layer}.geojson', layer=['sidewalks', 'crossings',
+                                                'elevator_paths'])
 
 rule fetch_sidewalks:
     output:
@@ -253,7 +253,7 @@ rule clean_sidewalks:
         df = df.rename(columns=rename)
 
         # Unit conversions
-        df['width'] = df['width'] * 0.0254  # inches to meters
+        df['width'] = round(df['width'] * 0.0254, 2)  # inches to meters
         df['offset'] = df['offset'] * 0.3048 # feet to meters
 
         # Map surface values from SDOT keys to OSM keys
@@ -1041,9 +1041,8 @@ rule add_inclines:
         sw['incline'] = (sw.ele_end - sw.ele_start) / sw.len
         sw = sw.drop(columns=['ele_start', 'ele_end', 'len'])
 
-        # Convert to integer, keep in range [-9999, 9999]
-        sw.incline = (sw.incline * 1000).astype(int)
-        sw.incline = sw.incline.apply(lambda x: min(max(x, -9999), 9999))
+        sw.incline = round(sw.incline, 3)
+        sw.incline = sw.incline.apply(lambda x: min(max(x, -1), 1))
 
         sw = sw.to_crs({'init': 'epsg:4326'})
 
@@ -1129,12 +1128,29 @@ rule network:
 
 rule finalize:
     input:
-        ['interim/inclined/sidewalks.geojson',
-         'interim/annotated/crossings.geojson',
+        ['interim/annotated/crossings.geojson',
          'interim/networked/elevator_paths.geojson',
          'interim/networked/sidewalks.geojson']
     output:
-        expand('output/{layer}.geojson', layer=['sidewalks', 'crossings', 'elevator_paths', 'sidewalks_network'])
+        expand('output/{layer}.geojson', layer=['crossings', 'elevator_paths', 'sidewalks'])
     run:
         for in_path, out_path in zip(input, output):
-            shell('cp {inpath} {outpath}'.format(inpath=in_path, outpath=out_path))
+            # Calculate length in UTM (TODO: just use Haversine? More accurate.)
+            df = gpd.read_file(in_path)
+            df.crs = {'init': 'epsg:4326'}
+            df_utm = dh.utm.gdf_to_utm(df)
+            df['length'] = df_utm.length.round(2)
+
+            # Quantize coordinates - only need 8th decimal place tops
+            def rounded_linestring(geometry, precision=8):
+                return LineString(np.round(geometry.coords, precision))
+
+            df["geometry"] = df.geometry.apply(rounded_linestring)
+
+            # FIXME: Figure out why "forward" becomes a float in the first place
+            # TODO: Add schema validation / type coercion? Serves as test + hand-wavy
+            # automatic fixer
+            if "sidewalks.geojson" in in_path:
+                df["forward"] = df["forward"].astype(int)
+
+            dh.io.gdf_to_geojson(df, out_path)
