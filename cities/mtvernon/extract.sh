@@ -1,7 +1,7 @@
 inputfile=$1
 outputdir=$2
 osmosis --read-pbf $inputfile \
-        --bounding-box left=-122.4062 bottom=48.3752 right=-122.1987 top=48.4502 \
+        --bounding-box left=-122.4062 bottom=48.3752 right=-122.1987 top=48.4503 completeWays=yes \
           outPipe.0=source \
         --tee inPipe.0=source \
           outputCount=3 \

@@ -69,7 +69,7 @@ rule extract_footways:
         'interim/extracted/footways.geojson'
     run:
         # Properties (k:v pairs) to keep from OSM data
-        # TODO: add transforms for redundant(-ish) values
+        # TODO: merge footways with pedestrian roads?
         keep = [
             'footway',
             'crossing',
@@ -396,9 +396,27 @@ rule add_inclines:
                 json.dump(sw, f)
 
 
+rule standardize_crossings:
+    input:
+        'interim/edgified/footways.geojson'
+    output:
+        'interim/standardized/footways.geojson'
+    run:
+        with open(input[0]) as f:
+            layer = json.load(f)
+
+        match = ["uncontrolled", "zebra"]
+        for feature in layer['features']:
+            if "crossing" in feature["properties"]:
+                if feature["properties"]["crossing"] in match:
+                    feature["properties"]["crossing"] = "marked"
+        with open(output[0], 'w') as f:
+            json.dump(layer, f)
+
+
 rule collect:
     input:
-        ['interim/inclined/footways.geojson',
+        ['interim/standardized/footways.geojson',
          'interim/inclined/pedestrian_roads.geojson',
          'interim/inclined/footyes.geojson',
          'interim/edgified/stairs.geojson',
