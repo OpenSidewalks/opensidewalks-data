@@ -20,6 +20,13 @@ import data_helpers as dh
 HTTP = HTTPRemoteProvider()
 
 
+# TODO: Add more (and more explicit) categories of output:
+#   - Deprectate "footyes" in favor of explicit new types:
+#       - highway=service
+#       - highway=cycleway
+#   - Interpret highway=path, foot=yes as a footway
+
+
 rule all:
     input:
         expand(
@@ -69,7 +76,6 @@ rule extract_footways:
         'interim/extracted/footways.geojson'
     run:
         # Properties (k:v pairs) to keep from OSM data
-        # TODO: merge footways with pedestrian roads?
         keep = [
             'footway',
             'crossing',
@@ -396,9 +402,10 @@ rule add_inclines:
                 json.dump(sw, f)
 
 
+# TODO: Use Osmosis --tag-transform!
 rule standardize_crossings:
     input:
-        'interim/edgified/footways.geojson'
+        'interim/inclined/footways.geojson'
     output:
         'interim/standardized/footways.geojson'
     run:
