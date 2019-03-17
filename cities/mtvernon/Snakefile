@@ -290,9 +290,63 @@ rule edgify:
             json.dump(new_geojson, f)
 
 
+rule add_curbramps_to_crossings:
+    input:
+        ["interim/edgified/transportation.geojson",
+         "interim/standardized/barriers.geojson"]
+    output:
+        "interim/curbramped/transportation.geojson"
+    run:
+        with open(input[0]) as f:
+            tr = json.load(f)
+
+        with open(input[1]) as g:
+            ba = json.load(g)
+
+        G = nx.MultiDiGraph()
+
+        # Create a graph with crossings as edges and nodes annotted with kerb info
+        for i, feature in enumerate(tr["features"]):
+            properties = feature["properties"]
+            if "footway" in properties and properties["footway"] == "crossing":
+                coords = feature["geometry"]["coordinates"]
+                u = ",".join([str(round(c, 7)) for c in coords[0]])
+                v = ",".join([str(round(c, 7)) for c in coords[-1]])
+                G.add_edges_from([(u, v, {**properties, **{"i": i}})])
+
+        has_raised = []
+        for feature in ba["features"]:
+            properties = feature["properties"]
+            if "kerb" in properties and properties["kerb"] == "raised":
+                lon, lat = feature["geometry"]["coordinates"]
+                node = "{},{}".format(round(lon, 7), round(lat, 7))
+                if node in G:
+                    pred = G.predecessors(node)
+                    succ = G.successors(node)
+                    for p in pred:
+                        edges = G[p][node]
+                        for key, data in edges.items():
+                            has_raised.append(data["i"])
+                    for s in succ:
+                        edges = G[node][s]
+                        for key, data in edges.items():
+                            has_raised.append(data["i"])
+
+        for i, feature in enumerate(tr["features"]):
+            properties = feature["properties"]
+            if "footway" in properties and properties["footway"] == "crossing":
+                if i in has_raised:
+                    properties["curbramps"] = 0
+                else:
+                    properties["curbramps"] = 1
+
+        with open(output[0], "w") as h:
+            json.dump(tr, h)
+
+
 rule add_lengths:
     input:
-        "interim/edgified/transportation.geojson"
+        "interim/curbramped/transportation.geojson"
     output:
         "interim/lengthed/transportation.geojson"
     run:
