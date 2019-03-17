@@ -136,6 +136,7 @@ rule standardize_transportation:
             "footway",
             "path",
             "pedestrian",
+            "service",
             "steps"
         ]
 

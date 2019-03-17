@@ -16,7 +16,7 @@ osmosis --read-pbf $inputfile \
           outPipe.2=barriers_in \
 \
         --tf inPipe.0=transportation_in \
-          accept-ways highway=footway,cycleway,path,pedestrian,steps \
+          accept-ways highway=footway,cycleway,path,pedestrian,service,steps \
         --un \
         --write-xml $outputdir/transportation.osm \
 \
