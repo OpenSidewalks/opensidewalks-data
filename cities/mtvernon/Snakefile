@@ -399,7 +399,7 @@ rule add_inclines:
                 continue
 
             if feature["properties"]["length"] < 3:
-                feature["properties"]["incline"] = 0
+                feature["properties"]["incline"] = 0.0
                 continue
 
             start_lonlat = feature["geometry"]["coordinates"][0]
@@ -432,7 +432,7 @@ rule add_inclines:
             incline = (eles[1] - eles[0]) / feature["properties"]["length"]
             incline = round(incline, 3)
             if incline > 1:
-                incline = 1
+                incline = 1.0
 
             feature["properties"]["incline"] = incline
 
