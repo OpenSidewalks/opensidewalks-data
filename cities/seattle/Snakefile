@@ -1081,6 +1081,8 @@ rule standardize:
         # Elevator path(s) - standardize to new schema
         with open(input[2]) as f:
             el = json.load(f)
+
+        for feature in el["features"]:
             props = feature["properties"]
             new_props = {}
             # TODO: retain original OpenStreetMap data tags - clarify corridors vs.
