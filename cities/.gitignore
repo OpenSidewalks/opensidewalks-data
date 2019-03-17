@@ -3,3 +3,5 @@
 !input/*
 !city.json
 !Snakefile
+!Snakefile.fetch
+!extract.sh
