@@ -106,6 +106,10 @@ rule standardize_transportation:
         }]
 
         tag_whitelist = {
+            "crossing": [
+                "marked",
+                "unmarked"
+            ],
             "footway": [
                 "sidewalk",
                 "crossing"
