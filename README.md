@@ -30,6 +30,14 @@ direct extension of the OpenMapTiles schema.
 
 #### Fields
 
+##### `description`
+
+*Unique to AccessMap*
+
+This is *not* from the original OpenStreetMap data, but is a free-form text field
+derived from spatial and other metadata, e.g. using street data one might have a
+description of "NE of Main St".
+
 ##### `footway`
 
 *Unique to AccessMap*
