@@ -1,0 +1,154 @@
+from io import BytesIO
+import json
+import os
+import shutil
+import sys
+import tempfile
+import zipfile
+
+from esridump.dumper import EsriDumper
+import rasterio as rio
+import requests
+from snakemake.remote.HTTP import RemoteProvider as HTTPRemoteProvider
+
+sys.path.append("../../src")
+
+HTTP = HTTPRemoteProvider()
+
+
+rule all:
+    input:
+        ["sourcedata/sidewalks.geojson",
+         "sourcedata/curbramps.geojson",
+         "sourcedata/crosswalks.geojson",
+         "sourcedata/streets.geojson",
+         "sourcedata/street_network_database.geojson",
+         "sourcedata/dem.tif"]
+
+
+rule fetch_sidewalks:
+    output:
+        "sourcedata/sidewalks.geojson"
+    run:
+        # OBJECTID Required for esri API to function
+        fields = ["OBJECTID"]
+        fields += ["COMPKEY", "SEGKEY", "SW_WIDTH", "WIDTH", "SURFTYPE", "SIDE"]
+
+        d = EsriDumper("https://gisrevprxy.seattle.gov/arcgis/rest/services/SDOT_EXT/ASSETS/mapserver/2",
+                        fields=fields)
+
+        geojson = {
+            "type": "FeatureCollection",
+            "features": list(d)
+        }
+
+        with open("{}".format(output[0]), "w") as f:
+            json.dump(geojson, f)
+
+
+rule fetch_streets:
+    output:
+        "sourcedata/streets.geojson"
+    run:
+        # OBJECTID Required for esri API to function
+        fields = ["OBJECTID"]
+        fields += ["COMPKEY", "STNAME_ORD", "STREETTYPE", "XSTRHI", "XSTRLO"]
+
+        d = EsriDumper("https://gisrevprxy.seattle.gov/arcgis/rest/services/SDOT_EXT/DSG_datasharing/MapServer/81",
+                       fields=fields)
+        geojson = {
+            "type": "FeatureCollection",
+            "features": list(d)
+        }
+
+        with open("{}".format(output[0]), "w") as f:
+            json.dump(geojson, f)
+
+
+rule fetch_snd:
+    input:
+        HTTP.remote("http://data-seattlecitygis.opendata.arcgis.com/datasets/0dd0ad79dc3845f3a296215d7c448a0d_2.geojson")
+    output:
+        "sourcedata/street_network_database.geojson"
+    run:
+        shell("mv {input} {output}")
+
+
+rule fetch_curbramps:
+    output:
+        "sourcedata/curbramps.geojson"
+    run:
+        # OBJECTID Required for esri API to function
+        fields = ["OBJECTID"]
+        fields += ["COLOR", "CONDITION", "CATEGORY", "DIRECTION", "RAMP_WIDTH",
+                   "STYLE", "SW_COMPKEY", "SW_LOCATION"]
+
+        d = EsriDumper("https://gisrevprxy.seattle.gov/arcgis/rest/services/SDOT_EXT/ASSETS/mapserver/14",
+                        fields=fields)
+        geojson = {
+            "type": "FeatureCollection",
+            "features": []
+        }
+
+        for feature in d:
+            geom = feature["geometry"]
+            if "NaN" not in geom["coordinates"]:
+                geojson["features"].append(feature)
+
+        with open("{}".format(output[0]), "w") as f:
+            json.dump(geojson, f)
+
+
+rule fetch_crosswalks:
+    output:
+        "sourcedata/crosswalks.geojson"
+    run:
+        # OBJECTID Required for esri API to function
+        fields = ["OBJECTID"]
+        fields += ["MIDBLOCK_CROSSWALK", "SEGKEY"]
+
+        d = EsriDumper("https://gisrevprxy.seattle.gov/arcgis/rest/services/SDOT_EXT/ASSETS/mapserver/9",
+                        fields=fields, extra_query_args={"geometryType": "esriGeometryPoint"})
+        geojson = {
+            "type": "FeatureCollection",
+            "features": list(d)
+        }
+
+        with open("{}".format(output[0]), "w") as f:
+            json.dump(geojson, f)
+
+
+rule fetch_dem:
+    output:
+        "sourcedata/dem.tif"
+    run:
+        url = ("https://prd-tnm.s3.amazonaws.com/StagedProducts/Elevation/13/ArcGrid/USGS_NED_13_n48w123_ArcGrid.zip")
+        # TODO: add progress bar using stream argument + click progress bar
+        response = requests.get(url)
+        response.raise_for_status()
+        zipper = zipfile.ZipFile(BytesIO(response.content))
+        extract_dir = "grdn48w123_13/"
+
+        # Extract everything
+        tempdir = tempfile.mkdtemp()
+        for path in zipper.namelist():
+            if extract_dir in path:
+                if extract_dir == path:
+                    continue
+                extract_path = os.path.join(tempdir, os.path.basename(path))
+                with zipper.open(path) as f:
+                    with open(extract_path, "wb") as g:
+                        g.write(f.read())
+
+        dem_path = os.path.join(tempdir, "w001001.adf")
+
+        with rio.open(dem_path) as src:
+            profile = src.profile
+
+            profile.update({"blockysize": 16, "driver": "GTiff", "compress": "lzw"})
+
+            with rio.open(output[0], "w", **profile) as dst:
+                data = src.read()
+                dst.write(data)
+
+        shutil.rmtree(tempdir)

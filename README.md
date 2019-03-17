@@ -118,6 +118,28 @@ Original value of the `foot` key if it is set to yes or no. Possible values:
 - 1
 - 0
 
+##### `opening_hours`
+
+*Unique to AccessMap*
+
+Original value of the `opening_hours` tag.
+
+##### `elevator`
+
+*Unique to AccessMap*
+
+Whether the path uses an elevator for vertical movement, e.g. building paths. Possible values:
+
+- 1
+- 0
+
+##### `width`
+
+*Unique to AccessMap*
+
+Original value of the `width` tag if it has no units (unit conversion not yet
+supported) - implied unit is meters.
+
 ##### `layer`
 
 The original layer tag on OpenStreetMap, this refers to the relative z-order of map
