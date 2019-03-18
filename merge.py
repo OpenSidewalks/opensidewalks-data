@@ -21,7 +21,7 @@ CITY_DATA = [{
 
 def merge_geojson(datasets):
     merged = {"type": "FeatureCollection", "features": []}
-    datasets_metadata = []
+    datasets_metadata = {"type": "FeatureCollection", "features": []}
     for dataset in datasets:
         with open(dataset["transportation_data"]) as f:
             fc = json.load(f)
@@ -33,10 +33,15 @@ def merge_geojson(datasets):
 
         points = MultiPoint(points)
         hull = points.convex_hull
-        datasets_metadata.append({
-            "name": dataset["name"],
-            "center": dataset["center"],
-            "hull": mapping(hull),
+        datasets_metadata["features"].append({
+            "type": "Feature",
+            "geometry": mapping(hull),
+            "properties": {
+                "name": dataset["name"],
+                "lon": dataset["center"][0],
+                "lat": dataset["center"][1],
+                "zoom": dataset["center"][2],
+            }
         })
 
     return merged, datasets_metadata
@@ -48,5 +53,5 @@ if __name__ == "__main__":
         os.mkdir("./merged")
     with open("./merged/transportation.geojson", "w") as f:
         json.dump(merged, f)
-    with open("./merged/areas_served.json", "w") as f:
+    with open("./merged/areas_served.geojson", "w") as f:
         json.dump(datasets_metadata, f)
