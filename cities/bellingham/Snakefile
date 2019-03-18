@@ -935,14 +935,15 @@ rule standardize:
             new_props = {}
             new_props["subclass"] = "footway"
             new_props["footway"] = "sidewalk"
+            # Calculate new lengths using Great-Circle Distance formula
+            length = dh.haversine(feature["geometry"]["coordinates"])
+            new_props["length"] = round(length, 1)
             if "incline" in props:
                 new_props["incline"] = props["incline"]
             if "surface" in props:
                 new_props["surface"] = props["surface"]
             if "width" in props:
                 new_props["width"] = props["width"]
-            if "length" in props:
-                new_props["length"] = props["length"]
             if "layer" in props:
                 new_props["layer"] = props["layer"]
             if "side" in props and "street_name" in props:
