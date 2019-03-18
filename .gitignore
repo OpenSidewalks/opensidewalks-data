@@ -3,4 +3,5 @@
 
 venv
 
-*.geojson
+merged/*
+!merged/.gitkeep
