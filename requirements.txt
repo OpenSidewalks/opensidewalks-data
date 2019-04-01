@@ -1,9 +1,9 @@
+-e git://github.com/dezhin/osmread.git@d8d3fe5edd15fdab9526ea7a100ee6c796315663#egg=osmread
 crossify==0.1.4
 esridump==1.7.0
-geopandas==0.3.0
-osmread==0.2.dev0
+geopandas==0.4.0
 rasterio==1.0a12
-requests==2.18.4
+requests==2.21
 scipy==1.0.1
 sidewalkify==0.2.1
 snakemake==4.8.0

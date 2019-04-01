@@ -773,7 +773,7 @@ rule intersection_elevations:
         st = gpd.read_file(input[1])
 
         st.crs = {'init': 'epsg:4326'}
-        st_dem = st.to_crs(dem.crs)
+        st_dem = st.to_crs(dem.crs.to_dict())
 
         # Create a graph from the streets
         G = nx.Graph()

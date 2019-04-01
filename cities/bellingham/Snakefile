@@ -593,7 +593,7 @@ rule intersection_elevations:
         bbox = sw.total_bounds
         st = st.loc[[q.object for q in st.sindex.intersection(bbox, objects=True)]]
 
-        st_dem = st.to_crs(dem.crs)
+        st_dem = st.to_crs(dem.crs.to_dict())
 
         # Create a graph from the streets
         G = nx.Graph()
