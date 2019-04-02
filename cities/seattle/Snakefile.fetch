@@ -18,17 +18,17 @@ HTTP = HTTPRemoteProvider()
 
 rule all:
     input:
-        ["sourcedata/sidewalks.geojson",
-         "sourcedata/curbramps.geojson",
-         "sourcedata/crosswalks.geojson",
-         "sourcedata/streets.geojson",
-         "sourcedata/street_network_database.geojson",
-         "sourcedata/dem.tif"]
+        ["data_sources/sidewalks.geojson",
+         "data_sources/curbramps.geojson",
+         "data_sources/crosswalks.geojson",
+         "data_sources/streets.geojson",
+         "data_sources/street_network_database.geojson",
+         "data_sources/dem.tif"]
 
 
 rule fetch_sidewalks:
     output:
-        "sourcedata/sidewalks.geojson"
+        "data_sources/sidewalks.geojson"
     run:
         # OBJECTID Required for esri API to function
         fields = ["OBJECTID"]
@@ -48,7 +48,7 @@ rule fetch_sidewalks:
 
 rule fetch_streets:
     output:
-        "sourcedata/streets.geojson"
+        "data_sources/streets.geojson"
     run:
         # OBJECTID Required for esri API to function
         fields = ["OBJECTID"]
@@ -69,14 +69,14 @@ rule fetch_snd:
     input:
         HTTP.remote("http://data-seattlecitygis.opendata.arcgis.com/datasets/0dd0ad79dc3845f3a296215d7c448a0d_2.geojson")
     output:
-        "sourcedata/street_network_database.geojson"
+        "data_sources/street_network_database.geojson"
     run:
         shell("mv {input} {output}")
 
 
 rule fetch_curbramps:
     output:
-        "sourcedata/curbramps.geojson"
+        "data_sources/curbramps.geojson"
     run:
         # OBJECTID Required for esri API to function
         fields = ["OBJECTID"]
@@ -101,7 +101,7 @@ rule fetch_curbramps:
 
 rule fetch_crosswalks:
     output:
-        "sourcedata/crosswalks.geojson"
+        "data_sources/crosswalks.geojson"
     run:
         # OBJECTID Required for esri API to function
         fields = ["OBJECTID"]
@@ -120,7 +120,7 @@ rule fetch_crosswalks:
 
 rule fetch_dem:
     output:
-        "sourcedata/dem.tif"
+        "data_sources/dem.tif"
     run:
         url = ("https://prd-tnm.s3.amazonaws.com/StagedProducts/Elevation/13/ArcGrid/USGS_NED_13_n48w123_ArcGrid.zip")
         # TODO: add progress bar using stream argument + click progress bar

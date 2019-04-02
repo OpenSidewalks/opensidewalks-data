@@ -58,8 +58,8 @@ rule clean_elevator_paths:
 
 rule clean_streets:
     input:
-        ['sourcedata/streets.geojson',
-         'sourcedata/street_network_database.geojson']
+        ['data_sources/streets.geojson',
+         'data_sources/street_network_database.geojson']
     output:
         'interim/clean/streets.geojson'
     run:
@@ -129,7 +129,7 @@ rule clean_streets:
 
 rule clean_sidewalks:
     input:
-        'sourcedata/sidewalks.geojson'
+        'data_sources/sidewalks.geojson'
     output:
         'interim/clean/sidewalks.geojson'
     run:
@@ -204,7 +204,7 @@ rule clean_sidewalks:
 
 rule clean_curbramps:
     input:
-        'sourcedata/curbramps.geojson'
+        'data_sources/curbramps.geojson'
     output:
         'interim/clean/curbramps.geojson'
     run:
@@ -222,7 +222,7 @@ rule clean_curbramps:
 
 rule clean_crosswalks:
     input:
-        'sourcedata/crosswalks.geojson'
+        'data_sources/crosswalks.geojson'
     output:
         'interim/clean/crosswalks.geojson'
     run:
@@ -764,7 +764,7 @@ rule join_crossings:
 
 rule intersection_elevations:
     input:
-        ['sourcedata/dem.tif',
+        ['data_sources/dem.tif',
          'interim/overridden/streets.geojson']
     output:
         'interim/dem/intersection_elevations.geojson'

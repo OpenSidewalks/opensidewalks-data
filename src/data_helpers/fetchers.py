@@ -59,6 +59,6 @@ def fetch_and_unzip(url, expanded_path, destination):
         if not os.path.exists(unzipped_path):
             raise Exception('Could not find matching files in zip archive.')
 
-        os.rename(unzipped_path, destination)
+        shutil.move(unzipped_path, destination)
     finally:
         shutil.rmtree(tempdir)

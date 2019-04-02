@@ -6,6 +6,7 @@ RUN apt-get update && \
       fiona \
       libsqlite3-mod-spatialite \
       libspatialindex-dev \
+      gdal-bin \
       osmosis
 
 RUN pip3 install --upgrade pip
