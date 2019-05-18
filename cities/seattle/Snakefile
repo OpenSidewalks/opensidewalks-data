@@ -1093,6 +1093,12 @@ rule standardize:
                 new_props["indoor"] = props["indoor"]
             if "layer" in props:
                 new_props["layer"] = props["layer"]
+                if props["layer"] == 1:
+                    # Is bridge (or on-ramp, etc)
+                    new_props["brunnel"] = "bridge"
+                elif props["layer"] == -1:
+                    # Is tunnel
+                    new_props["brunnel"] = "tunnel"
             if "length" in props:
                 new_props["length"] = props["length"]
             if "opening_hours" in props:
