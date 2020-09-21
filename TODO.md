@@ -1,5 +1,3 @@
-# AccessMap Data Generator TO-DO List
-
 ## Stay on 'street network' longer, use to stage crossings
 
 Attempting to draw crossings from sidewalk lines and streets, sans metadata
@@ -79,10 +77,7 @@ This strategy should be much faster than the current solution, which is also
 the bottleneck of our build process. It should also lead to fewer data errors.
 
 The primary downside is that it requires an associated between a sidewalk and
-a street, something we have not properly addressed in OpenStreetMap. With that
-said, we can get away with it because it's meant for use with AccessMap, and
-for staging data for later use in OpenStreetMap, and does not need to derive
-from OSM itself.
+a street, something we have not properly addressed in OpenStreetMap.
 
 ## Match to OSM roads first, then do network, etc.
 
