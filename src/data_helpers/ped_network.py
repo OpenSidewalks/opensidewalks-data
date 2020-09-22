@@ -36,13 +36,13 @@ def network_sidewalks(sidewalks, paths_list, tolerance=1e-1, precision=3):
             line.bounds[3] + tolerance
         ]
 
-        query = ends.sindex.intersection(bounds, objects=True)
+        hits = list(ends.sindex.intersection(bounds))
 
         # Now iterate over and filter
         distances_along = []
-        for q in query:
-            idx = q.object
-            point = ends.loc[idx, 'geometry']
+        for index in hits:
+            loc = ends.index[index]
+            point = ends.loc[loc, 'geometry']
 
             # Is the point actually within the tolerance distance?
             if point.distance(line) > tolerance:

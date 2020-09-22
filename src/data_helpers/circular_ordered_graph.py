@@ -96,6 +96,6 @@ def circular_ordered_graph(linestring_gdf, precision, columns=None,
                 out_data.append([v, i, d_edge])
         out_data_sorted = sorted(out_data, key=lambda x: x[2]['azimuth'])
         sorted_edges = [(v, i) for v, i, d_edge in out_data_sorted]
-        G.node[u]['sorted_edges'] = sorted_edges
+        G.nodes[u]['sorted_edges'] = sorted_edges
 
     return G

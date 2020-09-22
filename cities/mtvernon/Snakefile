@@ -1,5 +1,6 @@
 import copy
 import json
+import sys
 
 import networkx as nx
 from osmread import parse_file, Node, Way
@@ -10,6 +11,10 @@ from shapely.geometry import LinearRing, MultiPoint, Point
 
 sys.path.append("../../src")
 import data_helpers as dh
+
+
+WGS84 = 4326
+NAD83 = 26910
 
 
 rule all:
@@ -389,15 +394,18 @@ rule intersection_elevations:
                 else:
                     node_count[node] = 0
 
-        wgs84 = pyproj.Proj(init="epsg:4326")
-        demproj = pyproj.Proj(**dem.crs)
+        transformer = pyproj.Transformer.from_crs(
+            WGS84,
+            dem.crs.to_epsg(),
+            always_xy=True
+        )
 
         # Extract points of interest and project to same CRS as DEM
         points = []
         for node_id, node in nodes.items():
             if node_id in node_count:
                 if node_count[node_id] > 2 or node_count[node_id] == 1:
-                    coords = pyproj.transform(wgs84, demproj, node.lon, node.lat)
+                    coords = transformer.transform(node.lon, node.lat)
                     elevation = dh.raster_interp.interpolated_value(*coords, dem)
                     points.append({
                         "type": "Feature",
@@ -419,9 +427,9 @@ rule add_inclines:
     run:
         with open(input[0]) as f:
             el = json.load(f)
+
         # Project to UTM
-        wgs84 = pyproj.Proj(init="epsg:4326")
-        utm = pyproj.Proj(init="epsg:26910")
+        transformer = pyproj.Transformer.from_crs(WGS84, NAD83, always_xy=True)
 
         # Create interpolator
         xs = []
@@ -430,7 +438,7 @@ rule add_inclines:
 
         for point in el["features"]:
             coords = point["geometry"]["coordinates"]
-            x, y = pyproj.transform(wgs84, utm, coords[0], coords[1])
+            x, y = transformer.transform(coords[0], coords[1])
             xs.append(x)
             ys.append(y)
             zs.append(point["properties"]["elevation"])
@@ -465,7 +473,7 @@ rule add_inclines:
 
             eles = []
             for point in [start_lonlat, end_lonlat]:
-                in_utm = pyproj.transform(wgs84, utm, point[0], point[1])
+                in_utm = transformer.transform(point[0], point[1])
                 ele = interpolate(*in_utm)
 
                 if ele == -1000:

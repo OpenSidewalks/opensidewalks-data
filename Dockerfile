@@ -1,4 +1,4 @@
-FROM python:3.6-stretch
+FROM python:3.8.5-buster
 MAINTAINER Nick Bolten <nbolten@gmail.com>
 
 RUN apt-get update && \
@@ -11,9 +11,12 @@ RUN apt-get update && \
 
 RUN pip3 install --upgrade pip
 
+RUN pip3 install poetry
+
 RUN mkdir -p /work
 WORKDIR /work
 
-COPY ./requirements.txt /work
+COPY ./pyproject.toml /work
+COPY ./poetry.lock /work
 
-RUN pip3 install -r requirements.txt
+RUN poetry install

@@ -23,10 +23,10 @@ def fetch_shapefile(url, unzipped_path, bounds=None):
     gdf = gdf[~gdf.geometry.isnull()]
     gdf = gdf[~gdf.geometry.is_empty]
     # Convert to wgs84 and require that values be within the bounding box
-    gdf = gdf.to_crs({'init': 'epsg:4326'})
+    gdf = gdf.to_crs(4326)
     if bounds is not None:
-        query = gdf.sindex.intersection(bounds, objects=True)
-        gdf = gdf.loc[[q.object for q in query]]
+        hits = list(gdf.sindex.intersection(bounds))
+        gdf = gdf.iloc[hits]
 
     return gdf
 
@@ -40,10 +40,10 @@ def fetch_gdb(url, expanded_path, destination, bounds=None):
     gdf = gdf[~gdf.geometry.isnull()]
     gdf = gdf[~gdf.geometry.is_empty]
     # Convert to wgs84 and require that values be within the bounding box
-    gdf = gdf.to_crs({'init': 'epsg:4326'})
+    gdf = gdf.to_crs(4326)
     if bounds is not None:
-        query = gdf.sindex.intersection(bounds, objects=True)
-        gdf = gdf.loc[[q.object for q in query]]
+        hits = list(gdf.sindex.intersection(bounds))
+        gdf = gdf.iloc[hits]
 
     return gdf
 

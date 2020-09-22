@@ -1,4 +1,5 @@
-venv
-data_manager/venv
+cache
 cities
-pgsql_data
+merged
+output
+venv

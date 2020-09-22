@@ -1,3 +1,5 @@
+import sys
+
 import geopandas as gpd
 import networkx as nx
 import numpy as np
@@ -9,6 +11,9 @@ from shapely.geometry import MultiPoint, LinearRing, LineString, Point
 
 sys.path.append("../../src")
 import data_helpers as dh
+
+
+WGS84 = 4326
 
 
 rule all:
@@ -105,11 +110,11 @@ rule clean_sidewalks:
         df = explode_multilinestrings(df)
 
         # Add length and default / missing values
-        bounds = df.to_crs({"init": "epsg:4326"}).total_bounds
+        bounds = df.to_crs(WGS84).total_bounds
         lon = (bounds[0] + bounds[2]) / 2
         lat = (bounds[1] + bounds[3]) / 2
         utm_zone = dh.utm.lonlat_to_utm_epsg(lon, lat)
-        crs = {"init": "epsg:{}".format(utm_zone)}
+        crs = utm_zone
         df["length"] = df.to_crs(crs)["geometry"].length
 
         df["layer"] = 0
@@ -171,11 +176,11 @@ rule clean_crossings:
         df["marked"] = df["TYPE"].apply(lambda x: True if x == "marked" else False)
 
         # Add length and default / missing values
-        bounds = df.to_crs({"init": "epsg:4326"}).total_bounds
+        bounds = df.to_crs(WGS84).total_bounds
         lon = (bounds[0] + bounds[2]) / 2
         lat = (bounds[1] + bounds[3]) / 2
         utm_zone = dh.utm.lonlat_to_utm_epsg(lon, lat)
-        crs = {"init": "epsg:{}".format(utm_zone)}
+        crs = utm_zone
         df["length"] = df.to_crs(crs)["geometry"].length
 
         # TODO: Add "street_name" property downstream?
@@ -229,14 +234,15 @@ rule join_sidewalks:
         crs = sw.crs
 
         # Throw out all info on sidewalk links - they are derived from crossings and
-        # don"t have anything else useful.
+        # don't have anything else useful.
         sw_links = sw_links[["geometry"]]
 
         # Combine
-        sw = sw.append(sw_links)
-        sw = gpd.GeoDataFrame(sw)
+        joined_df = pd.concat([sw, sw_links], sort=False)
+        joined_df = gpd.GeoDataFrame(joined_df)
+        joined_df.crs = sw.crs
 
-        dh.io.gdf_to_geojson(sw, output[0])
+        dh.io.gdf_to_geojson(joined_df, output[0])
 
 
 rule add_curbramps_to_crossings:
@@ -253,10 +259,9 @@ rule add_curbramps_to_crossings:
         lon = (bounds[0] + bounds[2]) / 2
         lat = (bounds[1] + bounds[3]) / 2
         utm_zone = dh.utm.lonlat_to_utm_epsg(lon, lat)
-        utm = {"init": "epsg:{}".format(utm_zone)}
 
-        df = df.to_crs(utm)
-        cr = cr.to_crs(utm)
+        df = df.to_crs(utm_zone)
+        cr = cr.to_crs(utm_zone)
 
         # Count how many curb ramp points are really close to (effectively intersect)
         # a given crossing.
@@ -270,33 +275,17 @@ rule add_curbramps_to_crossings:
             bounds[2] += DIST_THRESHOLD
             bounds[3] += DIST_THRESHOLD
 
-            hits = [q.object for q in cr.sindex.intersection(bounds, objects=True)]
-            dists = cr.loc[hits]["geometry"].distance(crossing_geom)
+            hits = list(cr.sindex.intersection(bounds))
+            dists = cr.iloc[hits]["geometry"].distance(crossing_geom)
             n = (dists < DIST_THRESHOLD).sum()
             df.loc[idx, "n_curbramps"] = n
 
         # If curb ramp count > 1, set curb ramp flag to yes.
-        # df["n_curbramps"] = df["geometry"].apply(n_curbramps)
         df["curbramps"] = df["n_curbramps"] > 1
         df["curbramps"] = df["curbramps"].astype(int)
         df["length"] = df["geometry"].length
 
-        # example = df.iloc[546]
-
-        # ebounds = list(example["geometry"].bounds)
-        # print(ebounds)
-        # ebounds[0] -= 1
-        # ebounds[1] -= 1
-        # ebounds[2] += 1
-        # ebounds[3] += 1
-        # print(ebounds)
-        # hits = [q.object for q in cr.sindex.intersection(ebounds, objects=True)]
-        # print(hits)
-        # print(cr.loc[hits].distance(example["geometry"]))
-        # print(cr.loc[hits].distance(example["geometry"]) <= 1)
-        # print((cr.loc[hits].distance(example["geometry"]) <= 1).sum())
-
-        df = df.to_crs({"init": "epsg:4326"})
+        df = df.to_crs(WGS84)
 
         dh.io.gdf_to_geojson(df, output[0])
 
@@ -345,7 +334,7 @@ rule intersect_sidewalks:
             "idx": df.index,
             "type": "last",
         })
-        ends = pd.concat([starts, lasts])
+        ends = pd.concat([starts, lasts], sort=False)
         for coord, grp in ends.groupby("coordinates").groups:
             if grp.shape:
                 # We"ve got grouped-together endpoints! These should be merged to a new
@@ -354,7 +343,7 @@ rule intersect_sidewalks:
                 new_y = grp.apply(lambda x: x[1]).mean()
                 starts.loc[grp[grp["type"] == "start"]["idx"], "coordinates"] = (new_x, new_y)
                 lasts.loc[grp[grp["type"] == "last"]["idx"], "coordinates"] = (new_x, new_y)
-        ends = pd.concat([starts, lasts])
+        ends = pd.concat([starts, lasts], sort=False)
         ends["geometry"] = ends["coordinates"].apply(lambda x: Point(x))
         ends = gpd.GeoDataFrame(ends)
 
@@ -385,8 +374,7 @@ rule intersect_sidewalks:
             bounds.append(point.x + DIST_THRESHOLD)
             bounds.append(point.y + DIST_THRESHOLD)
 
-            query = df.sindex.intersection(bounds, objects=True)
-            sw_rows = df.loc[[q.object for q in query]]
+            sw_rows = df.iloc[list(df.sindex.intersection(bounds))]
             sw_rows = sw_rows[sw_rows.distance(point) < DIST_THRESHOLD]
 
             lengths = sw_rows["geometry"].length
@@ -412,9 +400,8 @@ rule intersect_sidewalks:
         # Step 4: Find line-line intersections
         ixns = []
         for idx, row in df.iterrows():
-            query = df.sindex.intersection(row.geometry.bounds, objects=True)
-            sindex_matches = [q.object for q in query if q.object != idx]
-            df_sindex_matches = df.loc[sindex_matches]
+            df_matches = df.iloc[list(df.sindex.intersection(row.geometry.bounds))]
+            df_sindex_matches = df_matches[df_matches.index != idx]
             intersects = df_sindex_matches.intersects(row.geometry)
             if intersects.any():
                 df_matches = df_sindex_matches[intersects]
@@ -458,9 +445,9 @@ rule intersect_sidewalks:
 
         new_df = gpd.GeoDataFrame(new_rows)
 
-        combined_df = gpd.GeoDataFrame(pd.concat([df, new_df]))
+        combined_df = gpd.GeoDataFrame(pd.concat([df, new_df], sort=False))
         combined_df.crs = crs
-        df_wgs84 = combined_df.to_crs({"init": "epsg:4326"})
+        df_wgs84 = combined_df.to_crs(WGS84)
 
         # FIXME: Need to snap endpoints again - they are not properly-organized/shared
         # and, in particular, crossings + sidewalks end up just far enough away from
@@ -504,7 +491,7 @@ rule intersect_sidewalks_crossings:
         lasts = pd.DataFrame({
             "coordinates": cr["geometry"].apply(lambda x: tuple(np.round(x.coords[-1], PRECISION))),
         })
-        ends = pd.concat([starts, lasts])
+        ends = pd.concat([starts, lasts], sort=False)
         ends["geometry"] = ends["coordinates"].apply(lambda x: Point(x))
         ends = gpd.GeoDataFrame(ends)
 
@@ -522,8 +509,7 @@ rule intersect_sidewalks_crossings:
             bounds.append(point.x + DIST_THRESHOLD)
             bounds.append(point.y + DIST_THRESHOLD)
 
-            query = sw.sindex.intersection(bounds, objects=True)
-            sw_rows = sw.loc[[q.object for q in query]]
+            sw_rows = sw.iloc[list(sw.sindex.intersection(bounds))]
             sw_rows = sw_rows[sw_rows.distance(point) < DIST_THRESHOLD]
 
             lengths = sw_rows["geometry"].length
@@ -562,9 +548,9 @@ rule intersect_sidewalks_crossings:
         new_sw = gpd.GeoDataFrame(new_rows)
 
         # FIXME: do we need to drop the "old" rows?
-        combined_df = gpd.GeoDataFrame(pd.concat([sw, new_sw]))
+        combined_df = gpd.GeoDataFrame(pd.concat([sw, new_sw], sort=False))
         combined_df.crs = crs
-        sw_wgs84 = combined_df.to_crs({"init": "epsg:4326"})
+        sw_wgs84 = combined_df.to_crs(WGS84)
 
         # FIXME: there are precision issues with these snapped coordinates: they are up
         # to ~7 mm away from one another. This isn"t an issue in visualization, but our
@@ -591,9 +577,9 @@ rule intersection_elevations:
         # Use sidewalks extent to limit streets.
         # TODO: consider having a hard-coded extent polygon / bounding box per-city
         bbox = sw.total_bounds
-        st = st.loc[[q.object for q in st.sindex.intersection(bbox, objects=True)]]
+        st = st.iloc[list(st.sindex.intersection(bbox))]
 
-        st_dem = st.to_crs(dem.crs.to_dict())
+        st_dem = st.to_crs(dem.crs.to_epsg())
 
         # Create a graph from the streets
         G = nx.Graph()
@@ -672,8 +658,7 @@ rule add_inclines:
         lon = (bounds[0] + bounds[2]) / 2
         lat = (bounds[1] + bounds[3]) / 2
         utm_zone = dh.utm.lonlat_to_utm_epsg(lon, lat)
-        crs = {"init": "epsg:{}".format(utm_zone)}
-        sw["len"] = sw.to_crs(crs).geometry.length
+        sw["len"] = sw.to_crs(utm_zone).geometry.length
 
         # Remove zero-length geometries. These are cases where the start and end
         # points are the same. For Bellingham, these apply to very short and
@@ -735,7 +720,7 @@ rule add_inclines:
         sw.incline = round(sw.incline, 3)
         sw.incline = sw.incline.apply(lambda x: min(max(x, -.99), .99))
 
-        sw = sw.to_crs({"init": "epsg:4326"})
+        sw = sw.to_crs(WGS84)
 
         dh.io.gdf_to_geojson(sw, output[0])
 
@@ -774,12 +759,11 @@ rule flatten_intersections:
                 # estimator
                 sw.loc[idx, "incline"] = 0
                 continue
-            query = cr.sindex.intersection(row["geometry"].bounds, objects=True)
-            cr_bbox = cr.loc[[q.object for q in query]]
+            cr_bbox = cr.iloc[list(cr.sindex.intersection(row["geometry"].bounds))]
             if (cr_bbox.distance(row["geometry"]) < THRESHOLD).any():
                 sw.loc[idx, "incline"] = 0
 
-        sw = sw.to_crs({"init": "epsg:4326"})
+        sw = sw.to_crs(WGS84)
 
         dh.io.gdf_to_geojson(sw, output[0])
 
@@ -810,7 +794,7 @@ rule snap:
             copy["_dataset_i"] = i
             combined.append(copy)
 
-        df = pd.concat(combined)
+        df = pd.concat(combined, sort=False)
 
         # Reset the index so every row has a unique entry
         df = df.reset_index(drop=True)
@@ -831,7 +815,7 @@ rule snap:
         # on spatial index matches: i <-> j edges. Connected subgraphs are clusters.
         starts = df.geometry.apply(lambda x: Point(x.coords[0]))
         lasts = df.geometry.apply(lambda x: Point(x.coords[-1]))
-        ends = gpd.GeoDataFrame(geometry=pd.concat([starts, lasts]))
+        ends = gpd.GeoDataFrame(geometry=pd.concat([starts, lasts], sort=False))
         ends["cluster"] = None
         start_labels = [1 for i in range(df.shape[0])]
         end_labels = [0 for i in range(df.shape[0])]
@@ -853,9 +837,9 @@ rule snap:
             bounds[2] += THRESHOLD1
             bounds[3] += THRESHOLD1
 
-            query = ends.sindex.intersection(bounds, objects=True)
-            candidate_idxs = [q.object for q in query]
-            candidates = ends.loc[candidate_idxs]
+            candidate_idxs = list(ends.sindex.intersection(bounds))
+            candidate_locs = ends.index[candidate_idxs]
+            candidates = ends.iloc[candidate_idxs]
 
             # If the rows are already in cluster(s), merge the clusters and assign all to
             # the lowest-number cluster
@@ -866,7 +850,7 @@ rule snap:
             else:
                 cluster_id = cluster_n
                 cluster_n += 1
-            ends.loc[candidate_idxs, "cluster"] = cluster_id
+            ends.loc[candidate_locs, "cluster"] = cluster_id
 
         for cluster_id, grp in ends.groupby("cluster"):
             if grp.shape[0] < 2:
@@ -889,7 +873,7 @@ rule snap:
                 df.loc[row["df_idx"], "geometry"] = LineString(coords)
 
 
-        df = df.to_crs({"init": "epsg:4326"})
+        df = df.to_crs(WGS84)
         for i, dataset in enumerate(datasets):
             dataset["geometry"] = list(df[df["_dataset_i"] == i]["geometry"])
             # Clean up - some geometries may have been invalidated by moving coordinates
@@ -911,7 +895,7 @@ rule finalize:
         # Convert to lon-lat and put in output directory
         for (in_path, out_path) in zip(input, output):
             df = gpd.read_file(in_path)
-            df = df.to_crs({"init": "epsg:4326"})
+            df = df.to_crs(WGS84)
             dh.io.gdf_to_geojson(df, out_path)
 
 

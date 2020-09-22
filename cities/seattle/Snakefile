@@ -17,6 +17,9 @@ sys.path.append('../../src')
 import data_helpers as dh
 
 
+WGS84 = 4326
+
+
 rule all:
     input:
         "output/transportation.geojson"
@@ -280,7 +283,7 @@ rule override_sidewalks:
             entry['pkey'] = id
             entry['geometry'] = shape(entry['geometry'])
             entries.append(entry)
-        df = pd.concat([df, gpd.GeoDataFrame(entries)])
+        df = pd.concat([df, gpd.GeoDataFrame(entries)], sort=False)
 
         dh.io.gdf_to_geojson(df, output[0])
 
@@ -334,8 +337,7 @@ rule draw_sidewalks:
 
         # Restrict to udistrict temporarily (for testing purposes only)
         # bbox = [-122.3228, 47.6500, -122.3049, 47.6635]
-        # idx = [q.object for q in st.sindex.intersection(bbox, objects=True)]
-        # st = st.loc[idx]
+        # st = st.iloc[list(st.sindex.intersection(bbox))]
 
         # Reproject into UTM
         st = dh.utm.gdf_to_utm(st)
@@ -358,13 +360,13 @@ rule draw_sidewalks:
             })
         df_paths = gpd.GeoDataFrame(rows)
         df_paths.crs = crs
-        df_paths = df_paths.to_crs({'init': 'epsg:4326'})
+        df_paths = df_paths.to_crs(WGS84)
 
         dh.io.gdf_to_geojson(df_paths, 'test_paths.geojson')
 
         # Reproject to WGS84
         redrawn.crs = crs
-        redrawn = redrawn.to_crs({'init': 'epsg:4326'})
+        redrawn = redrawn.to_crs(WGS84)
 
         # Update redrawn with geometries (so that other metadata remains)
         # Note: 'forward' = 1 from sidewalkify means sidewalk was drawn on the
@@ -401,7 +403,7 @@ rule draw_sidewalks:
         dh.io.gdf_to_geojson(sw, output[0])
 
         st.crs = crs
-        st = st.to_crs({'init': 'epsg:4326'})
+        st = st.to_crs(WGS84)
         dh.io.gdf_to_geojson(st, output[1])
 
 
@@ -479,8 +481,7 @@ rule draw_crossings:
 
         # Restrict to udistrict temporarily (for testing purposes only)
         # bbox = [-122.3228, 47.6500, -122.3049, 47.6635]
-        # idx = [q.object for q in st.sindex.intersection(bbox, objects=True)]
-        # st = st.loc[idx]
+        # st = st.loc[list(st.sindex.intersection(bbox))]
 
         # Set sidewalk IDs to None if they're not in the sw dataset
         st.loc[~st.pkey_left.isin(sw.pkey), 'pkey_left'] = np.nan
@@ -583,7 +584,7 @@ rule draw_crossings:
         crossings = gpd.GeoDataFrame(rows)
 
         crossings.crs = st.crs
-        crossings = crossings.to_crs({'init': 'epsg:4326'})
+        crossings = crossings.to_crs(WGS84)
         dh.io.gdf_to_geojson(crossings, output[0])
 
 
@@ -604,8 +605,7 @@ rule annotate_crossings_with_crosswalks:
         # Mark as having crosswalks if one is nearby
         def marked_within_dist(row, dist=3.5, default=None):
             g = row.geometry
-            q = [q.object for q in cw.sindex.nearest(g.bounds, 1, objects=True)]
-            in_bbox = cw.loc[q, 'geometry']
+            in_bbox = cw.iloc[list(cw.sindex.nearest(g.bounds, 1))]["geometry"]
             if in_bbox.empty:
                 return default
             else:
@@ -614,7 +614,7 @@ rule annotate_crossings_with_crosswalks:
         df['marked'] = df.apply(marked_within_dist, axis=1)
 
         # Reproject to WGS84
-        df = df.to_crs({'init': 'epsg:4326'})
+        df = df.to_crs(WGS84)
 
         dh.io.gdf_to_geojson(df, output[0])
 
@@ -731,7 +731,7 @@ rule add_midblock_crosswalks:
         mid_crossings = gpd.GeoDataFrame(rows)
 
         mid_crossings.crs = cr.crs
-        mid_crossings = mid_crossings.to_crs({'init': 'epsg:4326'})
+        mid_crossings = mid_crossings.to_crs(WGS84)
 
         dh.io.gdf_to_geojson(mid_crossings, output[0])
 
@@ -752,7 +752,7 @@ rule join_crossings:
         main = main[keep]
         mid = mid[keep]
 
-        combined = pd.concat([main, mid])
+        combined = pd.concat([main, mid], sort=False)
 
         # Look up the actual street name as well
         st_unique = st.drop_duplicates('pkey').set_index('pkey')
@@ -772,8 +772,8 @@ rule intersection_elevations:
         dem = rio.open(input[0])
         st = gpd.read_file(input[1])
 
-        st.crs = {'init': 'epsg:4326'}
-        st_dem = st.to_crs(dem.crs.to_dict())
+        st.crs = WGS84
+        st_dem = st.to_crs(dem.crs.to_epsg())
 
         # Create a graph from the streets
         G = nx.Graph()
@@ -898,13 +898,13 @@ rule add_inclines:
         sw.incline = round(sw.incline, 3)
         sw.incline = sw.incline.apply(lambda x: min(max(x, -1), 1))
 
-        sw = sw.to_crs({'init': 'epsg:4326'})
+        sw = sw.to_crs(WGS84)
 
         dh.io.gdf_to_geojson(sw, output[0])
 
         gdf2 = gpd.GeoDataFrame(geometry=[Polygon(convex_hull)])
         gdf2.crs = sw.crs
-        gdf2 = gdf2.to_crs({'init': 'epsg:4326'})
+        gdf2 = gdf2.to_crs(WGS84)
         dh.io.gdf_to_geojson(gdf2, 'interim/inclined/hull.geojson')
 
 
@@ -918,6 +918,9 @@ rule snap_elevator_paths:
         el = gpd.read_file(input[0])
         sw = gpd.read_file(input[1])
 
+        sw = dh.utm.gdf_to_utm(sw)
+        el = dh.utm.gdf_to_utm(el)
+
         # Find closest sidewalk
         for idx, row in el.iterrows():
             coords = list(row.geometry.coords)
@@ -926,13 +929,13 @@ rule snap_elevator_paths:
             point_start = Point(start)
             point_end = Point(end)
 
-            r = 1e-5
+            # Radius of search in meters
+            r = 1
 
             new = []
             for p in (point_start, point_end):
                 bbox = [p.x - r, p.y - r, p.x + r, p.y + r]
-                query = sw.sindex.intersection(bbox, objects=True)
-                sw_bbox = sw.loc[[q.object for q in query]].geometry
+                sw_bbox = sw.iloc[list(sw.sindex.intersection(bbox))]["geometry"]
                 closest_dist = sw_bbox.distance(p).sort_values().index[0]
                 closest = sw.loc[closest_dist]
                 new_point = closest.geometry.interpolate(closest.geometry.project(p))
@@ -943,6 +946,8 @@ rule snap_elevator_paths:
 
             new_geometry = LineString(coords)
             el.loc[idx, 'geometry'] = new_geometry
+
+        el = el.to_crs(WGS84)
 
         dh.io.gdf_to_geojson(el, output[0])
 
@@ -959,8 +964,8 @@ rule network:
         cr = gpd.read_file(input[1])
         el = gpd.read_file(input[2])
 
-        sw.crs = {'init': 'epsg:4326'}
-        cr.crs = {'init': 'epsg:4326'}
+        sw.crs = WGS84
+        cr.crs = WGS84
 
         sw = dh.utm.gdf_to_utm(sw)
         cr = dh.utm.gdf_to_utm(cr)
@@ -975,7 +980,7 @@ rule network:
         sw_network.loc[sw_network.length < 4, 'incline'] = 0
 
         sw_network.crs = sw.crs
-        sw_network = sw_network.to_crs({'init': 'epsg:4326'})
+        sw_network = sw_network.to_crs(WGS84)
 
         dh.io.gdf_to_geojson(sw_network, output[0])
 
@@ -991,7 +996,7 @@ rule cleanup:
         for in_path, out_path in zip(input, output):
             # Calculate length in UTM (TODO: just use Haversine? More accurate.)
             df = gpd.read_file(in_path)
-            df.crs = {'init': 'epsg:4326'}
+            df.crs = WGS84
             df_utm = dh.utm.gdf_to_utm(df)
             df['length'] = df_utm.length.round(2)
 

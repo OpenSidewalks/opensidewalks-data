@@ -19,7 +19,7 @@ rule all:
 
 rule fetch_bellingham_trans_database:
     output:
-        "data_sources/COB_Transportation.gdb"
+        directory("data_sources/COB_Transportation.gdb")
     run:
         url = "https://data.cob.org/data/gis/FGDB_Files/COB_Transportation.gdb.zip"
         dh.fetchers.fetch_and_unzip(url, "COB_Data/COB_Transportation.gdb", output[0])

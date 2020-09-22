@@ -72,8 +72,8 @@ def node_ends(gdf):
         bounds.append(point.x + DIST_THRESHOLD)
         bounds.append(point.y + DIST_THRESHOLD)
 
-        query = df.sindex.intersection(bounds, objects=True)
-        sw_rows = df.loc[[q.object for q in query]]
+        hits = list(df.sindex.intersection(bounds))
+        sw_rows = df.iloc[hits]
         sw_rows = sw_rows[sw_rows.distance(point) < DIST_THRESHOLD]
 
         lengths = sw_rows['geometry'].length
@@ -118,6 +118,6 @@ def node_ends(gdf):
 
     combined_df = gpd.GeoDataFrame(pd.concat([df, new_df]))
     combined_df.crs = crs
-    df_wgs84 = combined_df.to_crs({'init': 'epsg:4326'})
+    df_wgs84 = combined_df.to_crs(4326)
 
     dh.io.gdf_to_geojson(df_wgs84, output[0])
