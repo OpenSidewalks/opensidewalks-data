@@ -1077,6 +1077,9 @@ rule standardize:
             if "side" in props and "street_name" in props:
                 new_props["description"] = "Sidewalk {} of {}".format(props["side"], props["street_name"])
 
+            # NOTE: this might not be unique - is taken from parent dataset.
+            new_props["source_id"] = props["pkey"]
+
             transportation["features"].append({
                 "type": "Feature",
                 "geometry": feature["geometry"],
