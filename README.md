@@ -17,7 +17,7 @@ Schema reference implementations for multiple cities.
 
 ## Extract all regions and transform into `transportation.geojson` and `regions.geojson`
 
-docker run --rm -v $(pwd):/data opensidewalks-data bash -c "cd /data && python ./merge.py"
+    docker run --rm -v $(pwd):/data opensidewalks-data bash -c "cd /data && python ./merge.py"
 
 # OpenSidewalks Data Schema
 
