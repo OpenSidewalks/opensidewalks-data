@@ -26,42 +26,8 @@ rule fetch_osm:
 
 rule fetch_dem:
     input:
-        HTTP.remote("https://prd-tnm.s3.amazonaws.com/StagedProducts/Elevation/13/ArcGrid/USGS_NED_13_n49w123_ArcGrid.zip", keep_local=True)
-    output:
-        temp("data_sources/dem.zip")
-    run:
-        shell("mv {input} {output}")
-
-
-rule process_dem:
-    input:
-        "data_sources/dem.zip"
+        HTTP.remote("https://prd-tnm.s3.amazonaws.com/StagedProducts/Elevation/13/TIFF/current/n49w123/USGS_13_n49w123.tif", keep_local=True)
     output:
         "data_sources/dem.tif"
     run:
-        zipper = zipfile.ZipFile(input[0])
-        extract_dir = "grdn49w123_13/"
-
-        # Extract everything
-        tempdir = tempfile.mkdtemp()
-        for path in zipper.namelist():
-            if extract_dir in path:
-                if extract_dir == path:
-                    continue
-                extract_path = os.path.join(tempdir, os.path.basename(path))
-                with zipper.open(path) as f:
-                    with open(extract_path, "wb") as g:
-                        g.write(f.read())
-
-        dem_path = os.path.join(tempdir, "w001001.adf")
-
-        with rio.open(dem_path) as src:
-            profile = src.profile
-
-            profile.update({"blockysize": 16, "driver": "GTiff", "compress": "lzw"})
-
-            with rio.open(output[0], "w", **profile) as dst:
-                data = src.read()
-                dst.write(data)
-
-        shutil.rmtree(tempdir)
+        shell("mv {input} {output}")

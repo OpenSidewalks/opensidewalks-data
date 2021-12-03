@@ -9,8 +9,7 @@ import rasterio as rio
 import scipy
 from shapely.geometry import LinearRing, MultiPoint, Point
 
-sys.path.append("../../src")
-import data_helpers as dh
+import datahelpers as dh
 
 
 WGS84 = 4326

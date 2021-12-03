@@ -1,5 +1,5 @@
 [tool.poetry]
-name = "opensidewalks-data"
+name = "datahelpers"
 version = "0.1.0"
 description = "OpenSidewalks data workflows"
 authors = ["Nick Bolten <nbolten@gmail.com>"]

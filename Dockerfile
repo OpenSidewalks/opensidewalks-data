@@ -16,7 +16,7 @@ RUN pip3 install poetry
 RUN mkdir -p /work
 WORKDIR /work
 
-COPY ./pyproject.toml /work
-COPY ./poetry.lock /work
+COPY ./datahelpers /work/datahelpers
 
-RUN poetry install
+RUN pip install /work/datahelpers
+# RUN poetry install

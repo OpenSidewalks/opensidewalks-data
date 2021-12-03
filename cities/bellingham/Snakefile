@@ -9,8 +9,7 @@ import scipy
 from shapely.geometry import MultiPoint, LinearRing, LineString, Point
 
 
-sys.path.append("../../src")
-import data_helpers as dh
+import datahelpers as dh
 
 
 WGS84 = 4326

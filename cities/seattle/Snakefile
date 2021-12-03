@@ -1,4 +1,6 @@
 import json
+import math
+from pathlib import Path
 import sys
 
 import crossify.intersections
@@ -13,8 +15,7 @@ import sidewalkify
 from shapely.geometry import mapping, shape
 from shapely.geometry import Point, LinearRing, LineString, MultiPoint, Polygon
 
-sys.path.append('../../src')
-import data_helpers as dh
+import datahelpers as dh
 
 
 WGS84 = 4326
@@ -143,7 +144,6 @@ rule clean_sidewalks:
             'COMPKEY': 'pkey',
             'SEGKEY': 'streets_pkey',
             'SW_WIDTH': 'width',
-            'WIDTH': 'offset',
             'SURFTYPE': 'surface',
             'SIDE': 'side'
         }
@@ -151,7 +151,10 @@ rule clean_sidewalks:
 
         # Unit conversions
         df['width'] = round(df['width'] * 0.0254, 2)  # inches to meters
-        df['offset'] = df['offset'] * 0.3048 # feet to meters
+
+        # Offset key was removed (was called 'WIDTH')! Need to figure out
+        # side-of-street and offset info separately
+        # df['offset'] = df['offset'] * 0.3048 # feet to meters
 
         # Map surface values from SDOT keys to OSM keys
         df['surface2'] = None
@@ -183,7 +186,7 @@ rule clean_sidewalks:
         df = df.drop('OBJECTID', axis=1)
 
         # Drop offsets that make no sense and/or are undocumented
-        df = df[df['offset'].abs() > 1e-2]
+        # df = df[df['offset'].abs() > 1e-2]
 
         # TODO: look into 0-width sidewalks. Some just don't exist, others do
 
@@ -197,6 +200,8 @@ rule clean_sidewalks:
         for key, grp in multiple.groupby(['streets_pkey', 'side']):
             if grp.shape[0] > 1:
                 # More than one sidewalk on this side! Keep only the first entry
+                # FIXME: revisit this. Should be able to accomodate multiple
+                # sidewalk lines.
                 df = df.drop(grp.iloc[1:].index)
 
         # Drop unused columns
@@ -242,6 +247,148 @@ rule clean_crosswalks:
 
         dh.io.gdf_to_geojson(df, output[0])
 
+rule infer_sidewalk_offsets:
+    input:
+        ['interim/clean/sidewalks.geojson',
+         'interim/clean/streets.geojson']
+    output:
+        'interim/clean/sidewalks_w_offsets.geojson'
+    run:
+        TEST_SW_RIGHT_PKEY = 332730
+        TEST_SW_LEFT_PKEY = 294697
+        sidewalks = gpd.read_file(input[0])
+        streets = gpd.read_file(input[1])
+
+        merged = pd.merge(
+            sidewalks,
+            streets,
+            how="left",
+            left_on="streets_pkey",
+            right_on="pkey",
+            suffixes=["_sdw", "_str"]
+        )
+
+        def angle_between_vectors(v1, v2):
+            dotproduct = v1[0] * v2[0] + v1[1] * v2[1]
+            magnitude1 = v1[0]**2 + v1[1]**2
+            magnitude2 = v2[0]**2 + v2[1]**2
+            return math.acos(dotproduct / (magnitude1 * magnitude2))
+
+        def segment_side_point(point, segment):
+            dsx = segment[1][0] - segment[0][0]
+            dsy = segment[1][1] - segment[0][1]
+            dpx = point.x - segment[0][0]
+            dpy = point.y - segment[0][1]
+            cross_product = dsx * dpy - dsy * dpx
+            if (cross_product) > 0:
+                return "left"
+            else:
+                return "right"
+
+        def point_distance(p1, p2):
+            dx = (p2[0] - p1[0])
+            dy = (p2[1] - p1[1])
+
+            return (dx**2 + dy**2)**0.5
+
+        def line_side_point(point, linestring):
+            distance_along = linestring.project(point)
+
+            coords = linestring.coords
+            last = coords[0]
+            point_dist = 0
+            for i, p in enumerate(coords[1:]):
+                point_dist += point_distance(last, p)
+                # if point_dist == distance_along:
+                #     # Closest point is a vertex! Need to make a decision based
+                #     # on both segments connected to that vertex. If the
+                #     # angle between those segments is very small, it is
+                #     # possible to be on the 'right' side of one segment and
+                #     # the 'left' side of another.
+                #     first = segment_side_point(point, [coords[i-1], coords[i]])
+                #     second = segment_side_point(point, [coords[i], coords[i+1]])
+
+                #     if first == second:
+                #         return first
+                #     else:
+                #         seg1 = [coords[i], coords[i-1]]
+                #         seg2 = [coords[i], coords[i+1]]
+                #         v1 = [seg1[1][0] - seg1[0][0], seg1[1][1], seg1[0][1]]
+                #         v2 = [seg2[1][0] - seg2[0][0], seg2[1][1], seg2[0][1]]
+                #         angle_between = angle_between_vectors(v1, v2)
+                #         if angle_between < math.pi:
+                #             # Turn is to the left (CCW)
+                #             if v1 == "left" and v2 == "right":
+                #                 return "left"
+                #             else:
+                #                 return "right"
+
+                #         else:
+                #             # Turn is to the right (CW)
+                #             if v1 == "left" and v2 == "right":
+                #                 return "right"
+                #             else:
+                #                 return "left"
+                # elif point_dist > distance_along:
+                #     # Closest point is along this segment.
+                #     return segment_side_point(point, [coords[i-1], coords[i]])
+                if point_dist > distance_along:
+                  # Closest point is along this segment.
+                  return segment_side_point(point, [coords[i-1], coords[i]])
+
+
+                last = p
+
+            # If no side was calculate, use the last segment
+            return segment_side_point(point, [coords[-2], coords[-1]])
+
+        # left_test = merged[merged["pkey_sdw"] == TEST_SW_LEFT_PKEY].iloc[0]
+        # right_test = merged[merged["pkey_sdw"] == TEST_SW_RIGHT_PKEY].iloc[0]
+
+        # test_point_left = left_test["geometry_sdw"].interpolate(
+        #     0.5,
+        #     normalized=True
+        # )
+        # test_point_right = right_test["geometry_sdw"].interpolate(
+        #     0.5,
+        #     normalized=True
+        # )
+
+        # print(
+        #     "Left?: ",
+        #     line_side_point(test_point_left, left_test["geometry_str"])
+        # )
+        # print(
+        #     "Right?: ",
+        #     line_side_point(test_point_right, right_test["geometry_str"])
+        # )
+
+        # raise Exception()
+
+        sidewalks["street_side"] = "unknown"
+        sidewalks["offset"] = 0
+        for idx, row in merged.iterrows():
+            if row["geometry_str"] is None:
+                # No match on the row
+                # FIXME: investigate.
+                continue
+            if row["geometry_sdw"].is_empty:
+                # The street has an invalid geometry. Skip!
+                continue
+
+            test_point = row["geometry_sdw"].interpolate(0.5, normalized=True)
+            side = line_side_point(test_point, row["geometry_str"])
+            sidewalks.loc[idx, "street_side"] = side
+            sign = 1 if side == "right" else -1
+            offset = sign * (row["SURFACEWIDTH"] / 2 + 7.5)
+            offset = offset * 0.3048 # feet to meters
+            sidewalks.loc[idx, "offset"] = offset
+
+        sidewalks = sidewalks.loc[sidewalks["street_side"] != "unknown"]
+        sidewalks = sidewalks.loc[sidewalks["offset"] != 0]
+        dh.io.gdf_to_geojson(sidewalks, output[0])
+
+
 rule override_streets:
     input:
         ['interim/clean/streets.geojson',
@@ -262,7 +409,7 @@ rule override_streets:
 
 rule override_sidewalks:
     input:
-        ['interim/clean/sidewalks.geojson',
+        ['interim/clean/sidewalks_w_offsets.geojson',
          'input/override_sidewalks.json']
     output:
         'interim/overridden/sidewalks.geojson'
@@ -410,57 +557,78 @@ rule draw_sidewalks:
 rule adjust_curbramps:
     input:
         ['interim/clean/curbramps.geojson',
+         'interim/clean/sidewalks.geojson',
          'interim/redrawn/sidewalks.geojson']
     output:
         'interim/redrawn/curbramps.geojson'
     run:
         df = gpd.read_file(input[0])
-        sw = gpd.read_file(input[1])
+        sw_orig = gpd.read_file(input[1])
+        sw = gpd.read_file(input[2])
 
         # Assign curbramps to sidewalk line start/mid/end
-        def identify_position(cr_row):
-            loc = cr_row['SW_LOCATION']
-            if loc == 'M':
-                return 'mid'
 
-            sw_pkey = cr_row['sw_pkey']
-            sidewalk = sw.loc[sw.pkey == sw_pkey]
+        # SDOT dropped the metadata describing whether the curb ramp is at
+        # the start, end, or middle of the segment, so it now needs to be
+        # spatially inferred
 
-            if sidewalk.shape[0]:
-                sidewalk = sidewalk.iloc[0]
+        # Join to original (clean) sidewalks dataset because its geometries
+        # will match up.
+        merged = pd.merge(
+            df,
+            sw_orig,
+            how="left",
+            left_on="sw_pkey",
+            right_on="pkey",
+            suffixes=["_cr", "_sdw"]
+        )
+
+        def identify_position(row):
+            geom_cr = row["geometry_cr"]
+            geom_sdw = row["geometry_sdw"]
+            if geom_sdw is None or geom_sdw.is_empty:
+                return "none"
+            distance_along = geom_sdw.project(geom_cr, normalized=True)
+            if distance_along < 0.01:
+                return "end"
+            elif distance_along > 0.99:
+                return "start"
             else:
-                return 'none'
+                return "mid"
 
-            if sidewalk['forward']:
-                # Sidewalk is in low address -> high address direction, keep
-                # values
-                if loc == 'H':
-                    return 'end'
-                else:
-                    return 'start'
+        cr_positions = merged.apply(identify_position, axis=1)
+        # Aligns on shared index, which should be identical due to doing a
+        # left outer join
+        df["position"] = cr_positions
+
+        # Now join to the redrawn sidewalks dataset so they can be repositioned
+        merged2 = pd.merge(
+            df,
+            sw,
+            how="left",
+            left_on="sw_pkey",
+            right_on="pkey",
+            suffixes=["_cr", "_sdw"],
+        )
+
+        def move_cr(row):
+            sdw_geom = row["geometry_sdw"]
+            if sdw_geom is None or sdw_geom.is_empty:
+                return None
+            if row["position"] == "start":
+                return Point(row["geometry_sdw"].coords[0])
+            elif row["position"] == "end":
+                return Point(row["geometry_sdw"].coords[-1])
+            elif row["position"] == "mid":
+                projected = row["geometry_sdw"].project(row["geometry_cr"])
+                return row["geometry_sdw"].interpolate(projected)
             else:
-                # Sidewalk is in high address -> low address direction, swap
-                if loc == 'H':
-                    return 'start'
-                else:
-                    return 'end'
+                return None
 
-        # Adjust curb ramp positions
-        def adjust(cr_row):
-            sw_pkey = cr_row['sw_pkey']
-            sidewalk = sw.loc[sw.pkey == sw_pkey].iloc[0]
-
-            if cr_row['position'] == 'start':
-                return Point(sidewalk.geometry.coords[0])
-            elif cr_row['position'] == 'end':
-                return Point(sidewalk.geometry.coords[-1])
-            else:
-                return sidewalk.geometry.interpolate(0.5, normalized=True)
-
-        df = df.loc[df['sw_pkey'].isin(sw['pkey'])]
-        df['position'] = df.apply(identify_position, axis=1)
-        df = df.loc[df['position'] != 'none']
-        df['geometry'] = df.apply(adjust, axis=1)
+        merged2["new_geom"] = merged2.apply(move_cr, axis=1)
+        df["geometry"] = merged2["new_geom"]
+        df = df[df["position"] != "none"]
+        df = df[~df["geometry"].isnull()]
 
         dh.io.gdf_to_geojson(df, output[0])
 
