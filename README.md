@@ -8,7 +8,7 @@ Schema reference implementations for multiple cities.
 ### Docker-based installation
 
 1. Build the container
-    docker build -t opensidewalks-data .
+    docker build --platform linux/amd64 -t opensidewalks-data .
 
 ## Extract a single region's data
 
